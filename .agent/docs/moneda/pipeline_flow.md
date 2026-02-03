@@ -83,32 +83,25 @@ Para cada instrumento:
    - Si balanceado: "balanceado"
    - De lo contrario: Moneda con mayor porcentaje
 5. Obtener allocations internas de Allocations Internos
-6. Calcular `Moneda_Antigua` (moneda interna dominante)
-7. Hacer merge de `Moneda:` desde allocations internas
+6. Copiar `Moneda_Interna` desde campo `SubMoneda` del maestro
 
 **Columnas Clave de Salida:**
-- Todas las columnas anteriores
-- `Moneda_Calculada`: Moneda calculada desde Refinitiv
-- `Moneda_Interna` / `SubMoneda`: Moneda actual desde base de datos
-- `Moneda_Antigua`: Moneda de allocation interna dominante
+- `ID`: Identificador único del instrumento
+- `Moneda_Calculada`: Moneda de allocation externa dominante
+- `Moneda_Interna`: Moneda actual en base de datos (desde SubMoneda)
 - `Total_Pct_Ext`: Suma de porcentajes externos
 - `Es_Balanceado`: Flag booleano
 
 ---
 
-### PASO 6: Validación y Generación de Flag
+### PASO 6: Validación de Inconsistencias
 **Entrada:** Instrumentos clasificados  
 **Salida:** Resultados finales de validación  
 **Proceso:**
-1. Generar `Semáforo` (Flag) basado en `Total_Pct_Ext`:
-   - 60-120%: VALIDO
-   - 40-60% o >120%: REVISION
-   - <40%: ERROR
-2. Comparar `Moneda_Calculada` vs `Moneda_Interna`
-3. Generar `Detalle_Inconsistencia` si difieren
-4. Renombrar columnas para export:
+1. Comparar `Moneda_Calculada` vs `Moneda_Interna`
+2. Generar `Detalle_Inconsistencia` si difieren
+3. Renombrar columnas para export:
    - `Nombre` → `Instrumento`
-   - `Semáforo` → `Flag`
    - etc.
 
 **Columnas Clave de Salida:**
@@ -116,29 +109,39 @@ Para cada instrumento:
 - `Instrumento`
 - `Moneda_Calculada`
 - `Moneda_Interna`
-- `Semáforo` / `Flag`
 - `Detalle_Inconsistencia`
 - `Total_Pct_Ext`
-- `Moneda_Antigua`
+- `Moneda_Interna`
+
+**Nota:** El `Flag` se calcula en la fase de export, no en el pipeline.
 
 **Guardado en:** `st.session_state.df_final_moneda`
 
 ---
 
-### PASO 7: Escalar Allocations Proporcionalmente
-**Entrada:** `df_final_moneda` (con Flag calculado), `df_alloc_ext_moneda`  
+### PASO 7: Calcular Total Pre-Escalado y Escalar Allocations
+**Entrada:** `df_final_moneda`, `df_alloc_ext_moneda`  
 **Salida:** `df_alloc_ext_escalado` con porcentajes normalizados  
 **Proceso:**
-1. Identificar instrumentos con `Flag != 'ERROR'`
-2. Para cada instrumento válido:
-   - Calcular suma actual: `suma_actual = Σ percentage_num`
-   - Calcular factor de escalado: `factor = 100 / suma_actual`
-   - Aplicar escalado: `percentage_escalado = percentage_num × factor`
-3. Crear nueva columna `percentage_escalado`
-4. Instrumentos con Flag = 'ERROR' mantienen porcentajes originales
+1. **Calcular `Total_Pre_Escalado`:**
+   - Agrupar allocations por `ID`
+   - Sumar `percentage_num` para obtener total antes de escalar
+   - Agregar columna `Total_Pre_Escalado` al DataFrame
+
+2. **Escalar solo instrumentos con cobertura suficiente:**
+   - Filtrar instrumentos con `Total_Pct_Ext >= 40%`
+   - Para cada instrumento:
+     - Calcular factor: `factor = 100 / Total_Pct_Ext`
+     - Aplicar: `percentage_escalado = percentage_num × factor`
+   - Instrumentos con `Total_Pct_Ext < 40%` NO se escalan
+
+3. **Resultado:**
+   - Porcentajes suman exactamente 100% (cuando Total_Pct_Ext >= 40%)
+   - Proporciones relativas se mantienen
 
 **Columnas de Salida:**
 - Todas las columnas originales de allocations
+- `Total_Pre_Escalado`: Suma original antes del escalado
 - `percentage_escalado`: Porcentaje normalizado (suma 100% por instrumento)
 
 **Guardado en:** `st.session_state.df_alloc_ext_moneda` (sobrescribe con versión escalada)
@@ -148,7 +151,8 @@ Para cada instrumento:
 **Justificación:**
 - Normaliza datos para exports consistentes
 - Mantiene proporciones relativas
-- Solo afecta instrumentos con datos válidos (no ERROR)
+- Solo afecta instrumentos con cobertura suficiente (>= 40%)
+- `Total_Pre_Escalado` permite análisis pre y post escalado
 
 ---
 

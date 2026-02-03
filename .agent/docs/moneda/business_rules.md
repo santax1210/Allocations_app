@@ -17,34 +17,50 @@
 - USD: 85%, CLP: 10%, EUR: 5% → `Moneda_Calculada = "balanceado"` (ninguna >= 90%)
 - CLP: 70%, USD: 20%, EUR: 10% → `Moneda_Calculada = "balanceado"` (ninguna >= 90%)
 
-### Moneda_Antigua (Moneda Dominante Interna)
-**Origen:** Allocations Internos  
+### Moneda_Interna (Moneda Dominante Interna)
+**Origen:** Maestro de Instrumentos (campo `SubMoneda`)  
 **Cálculo:**
-1. Obtener todas las allocations internas para el instrumento
-2. Encontrar el porcentaje máximo entre todas las monedas
-3. **Si el porcentaje máximo >= 90%**: Usar esa moneda
-4. **Si el porcentaje máximo < 90%**: Usar "balanceado"
+1. Se copia directamente del campo `SubMoneda` del maestro de instrumentos
+2. Representa la moneda actual almacenada en la base de datos
+3. Puede ser una moneda específica (USD, CLP, EUR) o "balanceado"
 
-**Código de Referencia:** `src/pipeline.py` líneas 617-624
+**Código de Referencia:** `src/pipeline.py` línea 384
 
 ---
 
-## Lógica de Flag (Semáforo)
+## Lógica de FLAG (Estado de Cambio)
 
-**Propósito:** Validar la calidad de cobertura de allocations  
-**Basado en:** `Total_Pct_Ext` (suma de porcentajes de allocations externas)
+**Propósito:** Indicar el tipo de cambio entre `Moneda_Anterior` (interna) y `SubMoneda` (calculada externa)
 
-**Reglas:**
-- **60% - 120%** → `VALIDO` (verde)
-- **40% - 60%** O **> 120%** → `REVISION` (amarillo)
-- **< 40%** → `ERROR` (rojo)
+**Nota:** `Moneda_Anterior` en el export corresponde a `Moneda_Interna` del pipeline.
 
-**Código de Referencia:** `src/pipeline.py` líneas 698-709
+**Valores según Export:**
 
-**Justificación:**
-- 60-120%: Buena cobertura (permite redondeo/problemas de calidad de datos)
-- 40-60% o >120%: Necesita revisión (datos incompletos o duplicados)
-- <40%: Error crítico (datos insuficientes)
+### Export Balanceados
+- **`Caso_1`**: Balanceado a Balanceado
+  - `Moneda_Anterior = "BALANCEADO"` Y `SubMoneda = "BALANCEADO"`
+  - No hubo cambio, se mantiene balanceado
+
+- **`Caso_2`**: Moneda a Balanceado  
+  - `Moneda_Anterior = [Moneda específica]` Y `SubMoneda = "BALANCEADO"`
+  - Ejemplo: USD → BALANCEADO
+  - Cambió de moneda específica a balanceado
+
+### Export No Balanceados
+- **`Caso_1`**: Moneda a Misma Moneda
+  - `Moneda_Anterior = USD` Y `SubMoneda = USD`
+  - No hubo cambio de moneda
+
+- **`Caso_2`**: Balanceado a Moneda
+  - `Moneda_Anterior = "BALANCEADO"` Y `SubMoneda = [Moneda específica]`
+  - Ejemplo: BALANCEADO → USD
+  - Cambió de balanceado a moneda específica
+
+- **`Caso_3`**: Moneda a Otra Moneda
+  - `Moneda_Anterior = USD` Y `SubMoneda = EUR`
+  - Cambió de una moneda a otra diferente
+
+**Código de Referencia:** `pages/2_Validacion_Allocations.py` función `calcular_flag_cambio()`
 
 ---
 
@@ -53,8 +69,8 @@
 **Propósito:** Normalizar los porcentajes de allocations externas para que sumen exactamente 100%
 
 **Cuándo se aplica:**
-- Solo para instrumentos con `Flag != 'ERROR'`
-- Después de calcular el Flag
+- Solo para instrumentos con `Total_Pct_Ext >= 40%`
+- Después de calcular moneda dominante
 - Antes de generar los exports
 
 **Lógica:**
@@ -83,8 +99,9 @@ Allocations escaladas:
 **Características:**
 - ✅ Mantiene proporciones relativas entre monedas
 - ✅ Resultado siempre suma 100%
-- ✅ No afecta instrumentos con Flag = 'ERROR'
+- ✅ No afecta instrumentos con Total_Pct_Ext < 40%
 - ✅ Preserva la clasificación (balanceado/no balanceado)
+- ✅ Genera columna `Total_Pre_Escalado` con suma original
 
 **Código de Referencia:** `src/pipeline.py` (similar a pipeline_region)
 
@@ -164,10 +181,10 @@ Allocations escaladas:
 
 **Lógica de Asignación:**
 ```python
-if Flag == "ERROR":
-    Sobreescribir = "n"  # NO actualizar instrumentos con errores
+if Total_Pct_Ext < 40:
+    Sobreescribir = "n"  # NO actualizar instrumentos con cobertura insuficiente
 else:
-    Sobreescribir = "y"  # Actualizar todos los demás (VALIDO, REVISION)
+    Sobreescribir = "y"  # Actualizar todos los demás (>= 40% cobertura)
 ```
 
 **Aplicación:**
@@ -176,10 +193,10 @@ else:
 - ❌ Export de **Sin Datos**: NO incluye (son instrumentos sin información de Refinitiv)
 
 **Justificación:**
-- Instrumentos con `Flag = "ERROR"` tienen datos inconsistentes o incompletos
+- Instrumentos con `Total_Pct_Ext < 40%` tienen datos insuficientes
 - No deben actualizarse automáticamente en la base de datos
 - Requieren revisión manual antes de cualquier actualización
-- Instrumentos con `Flag = "VALIDO"` o `"REVISION"` pueden actualizarse de forma segura
+- Instrumentos con `Total_Pct_Ext >= 40%` tienen cobertura aceptable
 
 **Código de Referencia:** `pages/2_Validacion_Allocations.py` función `preparar_dataframe_exportacion`
 
@@ -193,20 +210,24 @@ else:
 - **Filtro:** `Moneda_Calculada == "balanceado"`
 - **Formato de Export:** Formato completo con todas las columnas de allocations
 - **Propósito:** Actualizar base de datos con instrumentos clasificados como balanceados
-- **Columnas:** ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, moneda_antigua, Flag, Inconsistencia, + todas las columnas de monedas (USD, CLP, EUR, etc.)
+- **Columnas:** ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, Moneda_Anterior, SubMoneda, Flag, Total_Pre_Escalado, Total, Sobreescribir, Inconsistencia_Calc, + todas las columnas de monedas (USD, CLP, EUR, etc.)
+- **FLAG valores:** `Caso_1` (Balanceado→Balanceado), `Caso_2` (Moneda→Balanceado)
 
 **Código de Referencia:** `pages/2_Validacion_Allocations.py` líneas 528-530
 
 ### No Balanceados  
 - **Filtro:** `Moneda_Calculada != "balanceado"` (tiene moneda específica)
-- **Formato de Export:** Formato simple de 5 columnas
+- **Formato de Export:** Formato simple
 - **Propósito:** Actualizar base de datos con la nueva clasificación de moneda específica
 - **Columnas:**
   - `ID`: Identificador interno
   - `Instrumento`: Nombre del instrumento
   - `SubMoneda`: Valor **NUEVO** (de `Moneda_Calculada`)
   - `Moneda_Anterior`: Valor **VIEJO** (de allocations internas)
-  - `Inconsistencia`: Detalle del error o vacío
+  - `Flag`: Tipo de cambio (Caso_1, Caso_2, Caso_3)
+  - `Sobreescribir`: "y" o "n" según cobertura
+  - `Inconsistencia_Calc`: Detalle del error o vacío
+- **FLAG valores:** `Caso_1` (USD→USD), `Caso_2` (Balanceado→Moneda), `Caso_3` (USD→EUR)
 
 **Código de Referencia:** `pages/2_Validacion_Allocations.py` líneas 562-565
 
@@ -226,62 +247,5 @@ else:
 
 **Justificación:** Estos exports actualizan la base de datos, y la base de datos solo acepta identificadores RIC o ISIN para el matching con Refinitiv.
 
----
 
-## Columna Inconsistencia
 
-**Origen:** Combina `Detalle_Inconsistencia` y `Detalle_Validacion`  
-**Lógica:**
-- Para validación de Moneda: Usar `Detalle_Inconsistencia`
-- Para validación de Región: Usar `Detalle_Validacion`
-- Muestra mensaje de error detallado si la validación falla
-- Vacío si no hay inconsistencia
-
-**Código de Referencia:** `pages/2_Validacion_Allocations.py` líneas 414-434
-
-**Valores Comunes:**
-- "Definido como BALANCEADO pero USD domina con 92.0%"
-- "Definido como USD pero es balanceado (máx 85.0%)"
-- "Definido como USD pero CLP domina con 91.0%"
-- String vacío (sin error)
-
----
-
-## Detección de Inconsistencias (Validación Interna)
-
-**Casos de Inconsistencia:**
-
-1. **BALANCEADO sin allocations:**
-   - `SubMoneda = "BALANCEADO"` pero no hay allocations internas
-   - Mensaje: "Definido como BALANCEADO pero no tiene allocations internas"
-
-2. **BALANCEADO pero dominante:**
-   - `SubMoneda = "BALANCEADO"` pero una moneda >= 90%
-   - Mensaje: "Definido como BALANCEADO pero {moneda} domina con {%}"
-
-3. **Moneda específica pero balanceado:**
-   - `SubMoneda = {moneda}` pero ninguna moneda >= 90%
-   - Mensaje: "Definido como {moneda} pero es balanceado (máx {%})"
-
-4. **Moneda incorrecta:**
-   - `SubMoneda = {moneda_A}` pero `{moneda_B}` >= 90%
-   - Mensaje: "Definido como {moneda_A} pero {moneda_B} domina con {%}"
-
-**Código de Referencia:** `src/pipeline.py` líneas 604-663
-
----
-
-## Normalización de Monedas
-
-**Refinitiv → Códigos ISO:**
-- "US Dollar" → "USD"
-- "Chilean Peso" → "CLP"  
-- "Euro" → "EUR"
-- "British Pound" → "GBP"
-- "Japanese Yen" → "JPY"
-- etc.
-
-**Mapeo:** Definido en `src/currency_mapping.py`  
-**Propósito:** Asegurar consistencia entre nombres de Refinitiv y códigos internos
-
-**Código de Referencia:** `src/currency_mapping.py`

@@ -7,7 +7,8 @@ Esta carpeta contiene toda la documentación relacionada con la **Validación de
 ### [business_rules.md](business_rules.md)
 Reglas de negocio específicas para validación de monedas:
 - Clasificación de Moneda_Calculada (umbral 90%)
-- Lógica de Flag/Semáforo
+- Lógica de FLAG (estado de cambio: Caso_1, Caso_2, Caso_3)
+- Escalado proporcional y Total_Pre_Escalado
 - Cálculo de fechas de export
 - División Balanceado vs No Balanceado
 - Detección de inconsistencias

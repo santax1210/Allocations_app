@@ -537,206 +537,11 @@ class ConciliacionPipeline:
             df_resultado['Es_Balanceado_Externo'] = False
             logger.warning("  No hay allocations externos para calcular moneda")
         
-        # DETECCIÓN DE INCONSISTENCIAS
-        # Comparar SubMoneda (Moneda_Interna) con cálculo matemático desde allocations internos
-        df_resultado['Inconsistencia'] = False
-        df_resultado['Detalle_Inconsistencia'] = ''
-        
-        if not self.allocations_interno.empty:
-            # Asegurar que ID sea string para las comparaciones
-            allocations_interno_temp = self.allocations_interno.copy()
-            allocations_interno_temp['ID'] = allocations_interno_temp['ID'].astype(str)
-            
-            for idx, row in df_resultado.iterrows():
-                moneda_interna = str(row.get('Moneda_Interna', '')).strip().upper()
-                moneda_metadata = str(row.get('Moneda:', '')).strip().upper()
-                
-                # Saltar si no hay SubMoneda definida
-                if not moneda_interna or moneda_interna in ['SIN DATOS', 'NAN', '', 'NONE']:
-                    continue
-                
-                # CASO ESPECIAL: SubMoneda dice BALANCEADO pero Moneda: indica FALTA ALLOCATION
-                if moneda_interna == 'BALANCEADO' and moneda_metadata == 'FALTA ALLOCATION':
-                    df_resultado.at[idx, 'Inconsistencia'] = True
-                    df_resultado.at[idx, 'Detalle_Inconsistencia'] = (
-                        "Definido como BALANCEADO pero no tiene allocations internas"
-                    )
-                    logger.warning(
-                        f"  Inconsistencia en {row['Nombre']}: "
-                        f"BALANCEADO pero sin allocations"
-                    )
-                    continue
-                
-                # Obtener allocations internos de este instrumento por ID
-                alloc_inst = allocations_interno_temp[
-                    allocations_interno_temp['ID'] == row['ID']
-                ]
-                
-                if alloc_inst.empty:
-                    # Si no hay allocations y está definido como BALANCEADO, es inconsistencia
-                    if moneda_interna == 'BALANCEADO':
-                        df_resultado.at[idx, 'Inconsistencia'] = True
-                        df_resultado.at[idx, 'Detalle_Inconsistencia'] = (
-                            "Definido como BALANCEADO pero no tiene allocations internas"
-                        )
-                        logger.warning(
-                            f"  Inconsistencia en {row['Nombre']}: "
-                            f"BALANCEADO pero sin allocations"
-                        )
-                    continue
-                
-                # Calcular porcentaje máximo y moneda dominante desde datos reales
-                max_porcentaje_interno = alloc_inst['percentage_num'].max()
-                es_balanceado_calc = max_porcentaje_interno < 90
-                
-                # Obtener la moneda con mayor porcentaje
-                moneda_dominante_calc = alloc_inst.loc[
-                    alloc_inst['percentage_num'].idxmax(), 'currency_code'
-                ].strip().upper() if not alloc_inst.empty else None
-                
-                # CASO 1: SubMoneda dice BALANCEADO pero cálculo dice NO balanceado (≥90%)
-                if moneda_interna == 'BALANCEADO' and not es_balanceado_calc:
-                    df_resultado.at[idx, 'Inconsistencia'] = True
-                    df_resultado.at[idx, 'Detalle_Inconsistencia'] = (
-                        f"Definido como BALANCEADO pero {moneda_dominante_calc} domina con {max_porcentaje_interno:.1f}%"
-                    )
-                    logger.warning(
-                        f"  Inconsistencia en {row['Nombre']}: "
-                        f"BALANCEADO pero {moneda_dominante_calc} {max_porcentaje_interno:.1f}%"
-                    )
-                
-                # CASO 2: SubMoneda dice moneda específica pero cálculo dice balanceado (<90%)
-                elif moneda_interna != 'BALANCEADO' and es_balanceado_calc:
-                    df_resultado.at[idx, 'Inconsistencia'] = True
-                    df_resultado.at[idx, 'Detalle_Inconsistencia'] = (
-                        f"Definido como {moneda_interna} pero es balanceado (máx {max_porcentaje_interno:.1f}%)"
-                    )
-                    logger.warning(
-                        f"  Inconsistencia en {row['Nombre']}: "
-                        f"{moneda_interna} pero balanceado max {max_porcentaje_interno:.1f}%"
-                    )
-                
-                # CASO 3: SubMoneda dice moneda específica pero cálculo muestra OTRA moneda dominante
-                elif (moneda_interna != 'BALANCEADO' and 
-                      not es_balanceado_calc and 
-                      moneda_dominante_calc and 
-                      moneda_interna != moneda_dominante_calc):
-                    df_resultado.at[idx, 'Inconsistencia'] = True
-                    df_resultado.at[idx, 'Detalle_Inconsistencia'] = (
-                        f"Definido como {moneda_interna} pero {moneda_dominante_calc} domina con {max_porcentaje_interno:.1f}%"
-                    )
-                    logger.warning(
-                        f"  Inconsistencia en {row['Nombre']}: "
-                        f"{moneda_interna} pero {moneda_dominante_calc} {max_porcentaje_interno:.1f}%"
-                    )
-            
-            num_inconsistencias = df_resultado['Inconsistencia'].sum()
-            logger.info(f"  Inconsistencias detectadas: {num_inconsistencias}")
-        else:
-            logger.info("  No hay allocations internos, no se detectaron inconsistencias")
+        # Detección de inconsistencias eliminada - ya no se usa en el proyecto
         
         return df_resultado
     
-    def paso_6_comparacion_y_validacion(self, df_clasificacion: pd.DataFrame) -> pd.DataFrame:
-        """
-        PASO 6: Generar semáforo de validación basado en coincidencia de moneda.
-        
-        Lógica del semáforo:
-        - 🟢 Verde (OK): Balanceado → Balanceado, o Moneda X → Moneda X
-        - 🟡 Amarillo (Revisar): Balanceado ↔ No balanceado
-        - 🔴 Rojo (Error): Moneda X → Moneda Y (distinta)
-        
-        Returns:
-            DataFrame final con validación por instrumento
-        """
-        logger.info("PASO 6: Generando semáforo de validación")
-        
-        if df_clasificacion.empty:
-            logger.warning("  No hay datos para validar")
-            return pd.DataFrame()
-        
-        def generar_semaforo(row):
-            interno = str(row['Moneda_Interna']).strip().upper()
-            calculado = str(row['Moneda_Calculada']).strip().upper()
-            es_bal_int = row['Es_Balanceado_Interno']
-            es_bal_ext = row['Es_Balanceado_Externo']
-            
-            # Sin datos externos
-            if calculado == 'SIN DATOS' or pd.isna(calculado):
-                return 'Sin Datos'
-            
-            # Caso 1: Ambos balanceados → Verde (Seguro)
-            if es_bal_int and es_bal_ext:
-                return '🟢 Seguro'
-            
-            # Caso 2: Balanceado ↔ No balanceado → Amarillo (Cambio)
-            if es_bal_int != es_bal_ext:
-                return '🟡 Cambio'
-            
-            # Caso 3: Ambos no balanceados, misma moneda → Verde (Seguro)
-            if not es_bal_int and not es_bal_ext:
-                if interno == calculado:
-                    return '🟢 Seguro'
-                else:
-                    # Moneda diferente → Rojo (Revisión)
-                    return '🔴 Revisión'
-            
-            return 'Sin Datos'
-        
-        df_clasificacion['Semáforo'] = df_clasificacion.apply(generar_semaforo, axis=1)
-        
-        # Seleccionar y renombrar columnas finales (incluir Tipo_Grupo para filtros UI + columnas de inconsistencia)
-        columnas_seleccionar = [
-            'ID',
-            'Nombre',
-            'Moneda_Interna',
-            'Moneda_Calculada',
-            'Semáforo',
-            'Tipo',
-            'Tipo_Grupo',
-            'Cusip',
-            'Isin',
-            'RIC',
-        ]
-        
-        # Agregar columnas de inconsistencia si existen
-        if 'Inconsistencia' in df_clasificacion.columns:
-            columnas_seleccionar.append('Inconsistencia')
-        if 'Detalle_Inconsistencia' in df_clasificacion.columns:
-            columnas_seleccionar.append('Detalle_Inconsistencia')
-        
-        df_final = df_clasificacion[columnas_seleccionar].copy()
-        
-        # Renombrar columnas
-        nuevos_nombres = [
-            'ID',
-            'Instrumento',
-            'Moneda_Interna',
-            'Moneda_Calculada',
-            'Semáforo',
-            'Tipo',
-            'Tipo_Grupo',
-            'Cusip',
-            'Isin',
-            'RIC',
-        ]
-        
-        # Agregar nombres para columnas de inconsistencia si existen
-        if 'Inconsistencia' in df_final.columns:
-            nuevos_nombres.append('Inconsistencia')
-        if 'Detalle_Inconsistencia' in df_final.columns:
-            nuevos_nombres.append('Detalle_Inconsistencia')
-        
-        df_final.columns = nuevos_nombres
-        
-        logger.info(f"  Validación completada: {len(df_final)} registros")
-        
-        # Estadísticas
-        semaforo_counts = df_final['Semáforo'].value_counts()
-        logger.info(f"  Semáforo: {semaforo_counts.to_dict()}")
-        
-        return df_final
-    
+
     def ejecutar_pipeline_completo(self, fecha_minima: str = "2025-01-01") -> Tuple[pd.DataFrame, Dict]:
         """
         Ejecuta el pipeline completo de principio a fin.
@@ -778,8 +583,11 @@ class ConciliacionPipeline:
         # PASO 5: Identificar moneda principal interna vs calculada
         df_clasificacion = self.paso_5_identificar_moneda_principal(df_filtrado, df_alloc_ext)
         
-        # PASO 6: Comparación y validación (genera semáforo)
-        df_final = self.paso_6_comparacion_y_validacion(df_clasificacion)
+        # Renombrar 'Nombre' a 'Instrumento' para consistencia con UI
+        if 'Nombre' in df_clasificacion.columns:
+            df_clasificacion = df_clasificacion.rename(columns={'Nombre': 'Instrumento'})
+        
+        df_final = df_clasificacion
         
         # PASO 7: Feature Engineering para ML
         logger.info("PASO 7: Generando features para detección de anomalías...")
@@ -802,8 +610,7 @@ class ConciliacionPipeline:
             'instrumentos_filtrados': len(df_filtrado),
             'allocations_externos': len(df_alloc_ext),
             'instrumentos_clasificados': len(df_clasificacion),
-            'validaciones_finales': len(df_final),
-            'semaforo': df_final['Semáforo'].value_counts().to_dict() if not df_final.empty else {}
+            'validaciones_finales': len(df_final)
         }
         
         logger.info("=" * 80)

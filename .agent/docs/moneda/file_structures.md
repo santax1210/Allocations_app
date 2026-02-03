@@ -182,10 +182,11 @@ El archivo se lee en formato **ancho** (wide format) pero se transforma inmediat
 | `Tipo_Grupo` | Calculado en pipeline | Grupo del instrumento (Acciones, Bonos, Fondos/ETF) |
 | `Tipo_Nombre` | Calculado en pipeline | Nombre descriptivo del tipo |
 | `Moneda_Calculada` | Calculado desde Allocations Externos | Nueva moneda calculada |
-| `Moneda_Antigua` | Calculado desde Allocations Internos | Moneda interna dominante |
+| `Moneda_Interna` | Maestro Instrumentos (campo SubMoneda) | Moneda actual en base de datos |
 | `Total_Pct_Ext` | Calculado desde Allocations Externos | Suma de % de allocations externas |
-| `Flag` / `Semáforo` | Calculado basado en Total_Pct_Ext | Estado de validación |
-| Columnas de monedas (USD, CLP, etc.) | Pivoteado desde Allocations Externos | Porcentajes individuales por moneda |
+| `Total_Pre_Escalado` | Calculado en pipeline | Suma de % antes del escalado (solo export Balanceados) |
+| `Flag` | Calculado en export | Estado de cambio (Caso_1, Caso_2, Caso_3) entre Moneda_Anterior y SubMoneda |
+| Columnas de monedas (USD, CLP, etc.) | Pivoteado desde Allocations Externos | Porcentajes individuales por moneda (escalados a 100%) |
 
 ---
 

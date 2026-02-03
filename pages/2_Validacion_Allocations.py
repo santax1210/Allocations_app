@@ -264,6 +264,49 @@ st.dataframe(
 # 4. Exportación
 st.markdown("### 📤 Exportar Datos")
 
+def calcular_flag_cambio(row):
+    """
+    Calcula FLAG basado en cambio entre Moneda_Anterior/Moneda_Interna y Moneda_Calculada.
+    
+    Returns:
+        - Caso_1: Balanceado → Balanceado, o Moneda → Misma Moneda
+        - Caso_2: Moneda → Balanceado, o Balanceado → Moneda
+        - Caso_3: Moneda → Otra Moneda
+    """
+    # Intentar obtener moneda antigua de diferentes columnas posibles
+    # NOTA: NO usar SubMoneda porque tiene significados diferentes según contexto
+    moneda_antigua = None
+    for col_name in ['Moneda_Anterior', 'Moneda_Interna']:
+        if col_name in row.index and pd.notna(row.get(col_name)):
+            moneda_antigua = str(row.get(col_name)).strip().upper()
+            if moneda_antigua and moneda_antigua not in ['', 'NAN', 'NONE']:
+                break
+    
+    moneda_calculada = str(row.get('Moneda_Calculada', '')).strip().upper()
+    
+    # Si no encontramos moneda antigua, retornar Caso_3 por defecto
+    if not moneda_antigua or moneda_antigua in ['', 'NAN', 'NONE']:
+        return "Caso_3"
+    
+    # Balanceado a Balanceado
+    if moneda_antigua == 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
+        return "Caso_1"
+    
+    # Moneda a Balanceado
+    if moneda_antigua != 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
+        return "Caso_2"
+    
+    # Balanceado a Moneda
+    if moneda_antigua == 'BALANCEADO' and moneda_calculada != 'BALANCEADO':
+        return "Caso_2"
+    
+    # Misma moneda
+    if moneda_antigua == moneda_calculada:
+        return "Caso_1"
+    
+    # Moneda diferente
+    return "Caso_3"
+
 def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
     """
     Prepara el DataFrame para exportación replicando el formato antiguo solicitado.
@@ -302,16 +345,41 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
                 elif 'currency_code' not in df_alloc_long.columns:
                     logger.error("[EXPORT ERROR] df_alloc_ext NO tiene columna 'currency_code'!")
                 else:
+                    # Calcular Total_Pct_Ext por ID ANTES del escalado
+                    totales_pct = df_alloc_long.groupby('ID')['percentage_num'].sum().reset_index()
+                    totales_pct.rename(columns={'percentage_num': 'Total_Pct_Ext'}, inplace=True)
+                    totales_pct['ID'] = totales_pct['ID'].astype(str)
+                    logger.info(f"[EXPORT DEBUG] Total_Pct_Ext calculado para {len(totales_pct)} instrumentos")
+                    
+                    # ESCALADO PROPORCIONAL: Solo para instrumentos con Total_Pct_Ext >= 40%
+                    df_alloc_escalado = df_alloc_long.copy()
+                    df_alloc_escalado['ID'] = df_alloc_escalado['ID'].astype(str)
+                    df_alloc_escalado = df_alloc_escalado.merge(totales_pct, on='ID', how='left')
+                    
+                    # Aplicar escalado solo donde Total_Pct_Ext >= 40%
+                    def escalar_porcentaje(row):
+                        if row['Total_Pct_Ext'] >= 40:
+                            return (row['percentage_num'] / row['Total_Pct_Ext']) * 100
+                        else:
+                            return row['percentage_num']
+                    
+                    df_alloc_escalado['percentage_escalado'] = df_alloc_escalado.apply(escalar_porcentaje, axis=1)
+                    logger.info(f"[EXPORT DEBUG] Escalado aplicado")
+                    
                     # Agrupar por ID y moneda para evitar duplicados en pivot
-                    # Usar percentage_escalado si existe, sino percentage_num
-                    pct_col = 'percentage_escalado' if 'percentage_escalado' in df_alloc_long.columns else 'percentage_num'
+                    pct_col = 'percentage_escalado'
                     logger.info(f"[EXPORT DEBUG] Usando columna: {pct_col}")
                     
                     try:
-                        df_alloc_long = df_alloc_long.groupby(['ID', 'currency_code'])[pct_col].sum().reset_index()
-                        df_alloc_wide = df_alloc_long.pivot(index='ID', columns='currency_code', values=pct_col)
+                        df_alloc_agrupado = df_alloc_escalado.groupby(['ID', 'currency_code'])[pct_col].sum().reset_index()
+                        df_alloc_wide = df_alloc_agrupado.pivot(index='ID', columns='currency_code', values=pct_col)
                         logger.info(f"[EXPORT DEBUG] Pivot exitoso. Columnas de monedas: {list(df_alloc_wide.columns)}")
                         logger.info(f"[EXPORT DEBUG] Número de instrumentos con allocations: {len(df_alloc_wide)}")
+                        
+                        # Guardar totales_pct para merge posterior
+                        df_alloc_wide = df_alloc_wide.merge(totales_pct, left_index=True, right_on='ID', how='left')
+                        df_alloc_wide = df_alloc_wide.set_index('ID')
+                        
                     except Exception as e:
                         logger.error(f"[EXPORT ERROR] Error en pivot: {e}")
                         import traceback
@@ -360,11 +428,28 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
             df_export['ID'] = df_export['ID'].astype(str)
             df_alloc_wide_reset['ID'] = df_alloc_wide_reset['ID'].astype(str)
             
+            # Guardar columnas que ya existen en df_export para no sobrescribirlas
+            columnas_existentes = set(df_export.columns)
+            columnas_alloc = set(df_alloc_wide_reset.columns) - {'ID'}
+            columnas_conflicto = columnas_existentes & columnas_alloc
+            
+            if columnas_conflicto:
+                logger.info(f"[EXPORT DEBUG] Columnas en conflicto (se preservarán de df_export): {columnas_conflicto}")
+                # Renombrar columnas conflictivas en df_alloc_wide_reset temporalmente
+                for col in columnas_conflicto:
+                    if col in df_alloc_wide_reset.columns:
+                        df_alloc_wide_reset = df_alloc_wide_reset.rename(columns={col: f'{col}_alloc'})
+            
             df_export = df_export.merge(df_alloc_wide_reset, on='ID', how='left')
             logger.info(f"[EXPORT DEBUG] Merge completado. df_export ahora tiene {len(df_export)} filas y columnas: {list(df_export.columns)}")
             
+            # Si Total_Pct_Ext no existía en df_export pero sí en df_alloc_wide, usar la de alloc
+            if 'Total_Pct_Ext_alloc' in df_export.columns and 'Total_Pct_Ext' not in columnas_existentes:
+                df_export['Total_Pct_Ext'] = df_export['Total_Pct_Ext_alloc']
+                df_export = df_export.drop(columns=['Total_Pct_Ext_alloc'])
+            
             # Llenar NaNs en columnas de datos con 0
-            cols_datos = [c for c in df_alloc_wide.columns if c in df_export.columns]
+            cols_datos = [c for c in df_alloc_wide.columns if c in df_export.columns and c != 'Total_Pct_Ext']
             if cols_datos:
                 df_export[cols_datos] = df_export[cols_datos].fillna(0)
                 logger.info(f"[EXPORT DEBUG] Rellenados NaNs en columnas: {cols_datos}")
@@ -474,20 +559,13 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         if 'moneda_antigua' in df_export.columns:
             cols_to_drop.append('moneda_antigua')
         
-        # Renombrar Detalle_Inconsistencia a Inconsistencia_Calc para export
-        if 'Detalle_Inconsistencia' in df_export.columns:
-            df_export['Inconsistencia_Calc'] = df_export['Detalle_Inconsistencia']
-            cols_to_drop.append('Detalle_Inconsistencia')
-        
         # Eliminar columnas que causarían duplicados
         df_export = df_export.drop(columns=cols_to_drop, errors='ignore')
         
-        # NUEVO: Agregar columna Sobreescribir
-        # "y" para todos los instrumentos excepto los que tienen Flag = "ERROR" (que tendrán "n")
+        # Calcular columna Sobreescribir basada en Total_Pct_Ext
         def calcular_sobreescribir(row):
-            # Buscar Flag en cualquiera de sus posibles nombres
-            flag = str(row.get('Flag', row.get('Semáforo', ''))).strip().upper()
-            return 'n' if flag == 'ERROR' else 'y'
+            total_pct = row.get('Total_Pct_Ext', 0)
+            return 'y' if total_pct >= 40 else 'n'
         
         df_export['Sobreescribir'] = df_export.apply(calcular_sobreescribir, axis=1)
         
@@ -498,9 +576,7 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
             'Id_ti_fixed': 'Id_ti',
             'Fecha_Calc': 'Fecha',
             'Clasificacion_Calc': 'Clasificacion',
-            'moneda_antigua_export': 'moneda_antigua',
-            'Semáforo': 'Flag',
-            'Inconsistencia_Calc': 'Inconsistencia'
+            'moneda_antigua_export': 'Moneda_Anterior'
         }
         
         # Aplicar renombre solo a las que existen
@@ -508,7 +584,8 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         df_export = df_export.rename(columns=rename_dict)
         
         # 5. Seleccionar columnas en orden prioritario (sin duplicados)
-        base_cols = ['ID', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'moneda_antigua', 'Flag', 'Inconsistencia', 'Sobreescribir']
+        # FLAG y Total_Pre_Escalado deben estar si existen en df_export
+        base_cols = ['ID', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'Moneda_Anterior', 'Flag', 'Total_Pre_Escalado', 'Sobreescribir']
         
         # Identificar columnas de allocations (las que estaban en df_alloc_wide)
         alloc_cols = list(df_alloc_wide.columns) if not df_alloc_wide.empty else []
@@ -519,9 +596,9 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
             if c in df_export.columns and c not in final_cols:
                 final_cols.append(c)
         
-        # Agregar columnas de monedas/regiones al final
+        # Agregar columnas de monedas/regiones al final (excluyendo Total_Pct_Ext)
         for c in alloc_cols:
-            if c in df_export.columns and c not in final_cols:
+            if c in df_export.columns and c not in final_cols and c != 'Total_Pct_Ext':
                 final_cols.append(c)
         
         # IMPORTANTE: Deduplicar por ID para evitar filas repetidas
@@ -597,26 +674,64 @@ if tipo_validacion == "Moneda":
                 ]
                 
                 if not balanceados.empty:
-                    # Usar la función de exportación completa (con allocations)
-                    df_alloc_ext = st.session_state.get('df_alloc_ext_moneda', pd.DataFrame())
+                    # Calcular FLAG y agregar a balanceados ANTES de llamar a preparar_dataframe_exportacion
+                    balanceados_con_flag = balanceados.copy()
+                    balanceados_con_flag['Flag'] = balanceados_con_flag.apply(calcular_flag_cambio, axis=1)
                     
-                    class PipelineMock:
-                        def __init__(self, df_alloc_ext):
-                            self.df_alloc_ext = df_alloc_ext
-                            self.df_alloc_ext_agrupado = df_alloc_ext
+                    # Filtrar solo Caso_1 y Caso_2 para balanceados
+                    balanceados_con_flag = balanceados_con_flag[balanceados_con_flag['Flag'].isin(['Caso_1', 'Caso_2'])]
                     
-                    pipeline_obj = PipelineMock(df_alloc_ext)
-                    df_export_bal = preparar_dataframe_exportacion(balanceados, pipeline_obj, tipo_validacion)
-                    excel_bal = to_excel(df_export_bal)
-                    
-                    st.download_button(
-                        label="⬇️ Descargar Balanceados",
-                        data=excel_bal,
-                        file_name=f"balanceados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_bal"
-                    )
-                    st.success(f"✅ {len(balanceados)} instrumentos balanceados listos para descargar")
+                    if not balanceados_con_flag.empty:
+                        # Usar la función de exportación completa (con allocations)
+                        df_alloc_ext = st.session_state.get('df_alloc_ext_moneda', pd.DataFrame())
+                        
+                        # Calcular Total_Pre_Escalado ANTES de llamar a preparar_dataframe_exportacion
+                        if not df_alloc_ext.empty and 'ID' in df_alloc_ext.columns:
+                            totales_pre_escalado = df_alloc_ext.groupby('ID')['percentage_num'].sum().reset_index()
+                            totales_pre_escalado.rename(columns={'percentage_num': 'Total_Pre_Escalado'}, inplace=True)
+                            totales_pre_escalado['ID'] = totales_pre_escalado['ID'].astype(str)
+                            
+                            # Merge Total_Pre_Escalado con balanceados_con_flag
+                            balanceados_con_flag['ID'] = balanceados_con_flag['ID'].astype(str)
+                            balanceados_con_flag = balanceados_con_flag.merge(totales_pre_escalado, on='ID', how='left')
+                        
+                        class PipelineMock:
+                            def __init__(self, df_alloc_ext):
+                                self.df_alloc_ext = df_alloc_ext
+                                self.df_alloc_ext_agrupado = df_alloc_ext
+                        
+                        pipeline_obj = PipelineMock(df_alloc_ext)
+                        df_export_bal = preparar_dataframe_exportacion(balanceados_con_flag, pipeline_obj, tipo_validacion)
+                        
+                        # Reordenar columnas para poner Flag y Total_Pre_Escalado después de Moneda_Anterior
+                        cols = list(df_export_bal.columns)
+                        if 'Flag' in cols and 'Moneda_Anterior' in cols:
+                            cols.remove('Flag')
+                            idx = cols.index('Moneda_Anterior') + 1
+                            cols.insert(idx, 'Flag')
+                        if 'Total_Pre_Escalado' in cols and 'Flag' in cols:
+                            cols.remove('Total_Pre_Escalado')
+                            idx = cols.index('Flag') + 1
+                            cols.insert(idx, 'Total_Pre_Escalado')
+                        
+                        # Asegurar que solo tengamos las columnas correctas (sin Total_Pct_Ext)
+                        if 'Total_Pct_Ext' in cols:
+                            cols.remove('Total_Pct_Ext')
+                        
+                        df_export_bal = df_export_bal[cols]
+                        
+                        excel_bal = to_excel(df_export_bal)
+                        
+                        st.download_button(
+                            label="⬇️ Descargar Balanceados",
+                            data=excel_bal,
+                            file_name=f"balanceados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_bal"
+                        )
+                        st.success(f"✅ {len(balanceados_con_flag)} instrumentos balanceados listos para descargar")
+                    else:
+                        st.info("No hay instrumentos balanceados con FLAG Caso_1 o Caso_2.")
                 else:
                     st.info("No hay instrumentos balanceados en la selección actual.")
             except Exception as e:
@@ -633,70 +748,74 @@ if tipo_validacion == "Moneda":
                 ]
                 
                 if not no_balanceados.empty:
-                    # Preparar export simple con solo 5 columnas
-                    df_export_no_bal = no_balanceados.copy()
+                    # Calcular FLAG antes de exportar
+                    no_balanceados['Flag'] = no_balanceados.apply(calcular_flag_cambio, axis=1)
                     
-                    # SubMoneda = Moneda Calculada (NUEVO valor a actualizar en BD)
-                    if 'Moneda_Calculada' in df_export_no_bal.columns:
-                        df_export_no_bal['SubMoneda_Nueva'] = df_export_no_bal['Moneda_Calculada']
+                    # Filtrar solo Caso_1, Caso_2, Caso_3 para no balanceados
+                    no_balanceados = no_balanceados[no_balanceados['Flag'].isin(['Caso_1', 'Caso_2', 'Caso_3'])]
+                    
+                    if not no_balanceados.empty:
+                        # Preparar export simple
+                        df_export_no_bal = no_balanceados.copy()
+                        
+                        # SubMoneda = Moneda Calculada (NUEVO valor a actualizar en BD)
+                        if 'Moneda_Calculada' in df_export_no_bal.columns:
+                            df_export_no_bal['SubMoneda_Nueva'] = df_export_no_bal['Moneda_Calculada']
+                        else:
+                            df_export_no_bal['SubMoneda_Nueva'] = ''
+                        
+                        # Moneda_Anterior = Moneda_Interna (del pipeline)
+                        if 'Moneda_Interna' in df_export_no_bal.columns:
+                            df_export_no_bal['Moneda_Anterior'] = df_export_no_bal['Moneda_Interna']
+                        elif 'SubMoneda' in df_export_no_bal.columns:
+                            df_export_no_bal['Moneda_Anterior'] = df_export_no_bal['SubMoneda']
+                        else:
+                            df_export_no_bal['Moneda_Anterior'] = ''
+                        
+                        # Agregar columna Sobreescribir
+                        # Para No Balanceados: "y" si tienen moneda calculada válida, "n" si no
+                        # (No usar Total_Pct_Ext porque No Balanceados no tienen distribución de allocations)
+                        def calcular_sobreescribir_no_bal(row):
+                            submoneda_nueva = str(row.get('SubMoneda_Nueva', '')).strip().upper()
+                            # Sobreescribir = "y" si hay una moneda calculada válida
+                            return 'y' if submoneda_nueva and submoneda_nueva not in ['', 'NAN', 'NONE'] else 'n'
+                        
+                        df_export_no_bal['Sobreescribir'] = df_export_no_bal.apply(calcular_sobreescribir_no_bal, axis=1)
+                        
+                        # IMPORTANTE: Eliminar columna SubMoneda original para evitar duplicados
+                        if 'SubMoneda' in df_export_no_bal.columns:
+                            df_export_no_bal = df_export_no_bal.drop(columns=['SubMoneda'])
+                        
+                        # Seleccionar y renombrar columnas finales
+                        columnas_finales = {
+                            'ID': 'ID',
+                            'Instrumento': 'Instrumento',
+                            'SubMoneda_Nueva': 'SubMoneda',
+                            'Moneda_Anterior': 'Moneda_Anterior',
+                            'Flag': 'Flag',
+                            'Sobreescribir': 'Sobreescribir'
+                        }
+                        
+                        # Renombrar
+                        df_export_no_bal = df_export_no_bal.rename(columns=columnas_finales)
+                        
+                        # Seleccionar columnas finales en el orden correcto (SIN Inconsistencia)
+                        cols_disponibles = ['ID', 'Instrumento', 'SubMoneda', 'Moneda_Anterior', 'Flag', 'Sobreescribir']
+                        cols_presentes = [c for c in cols_disponibles if c in df_export_no_bal.columns]
+                        df_export_no_bal = df_export_no_bal[cols_presentes]
+                        
+                        excel_no_bal = to_excel(df_export_no_bal)
+                        
+                        st.download_button(
+                            label="⬇️ Descargar No Balanceados",
+                            data=excel_no_bal,
+                            file_name=f"no_balanceados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_no_bal"
+                        )
+                        st.success(f"✅ {len(no_balanceados)} instrumentos no balanceados listos para descargar")
                     else:
-                        df_export_no_bal['SubMoneda_Nueva'] = ''
-                    
-                    # Moneda_Anterior = Moneda que estaba en BD (VIEJO valor)
-                    # Buscar en SubMoneda o Moneda_Interna (el valor original de la BD)
-                    if 'SubMoneda' in df_export_no_bal.columns:
-                        df_export_no_bal['Moneda_Anterior'] = df_export_no_bal['SubMoneda']
-                    elif 'Moneda_Interna' in df_export_no_bal.columns:
-                        df_export_no_bal['Moneda_Anterior'] = df_export_no_bal['Moneda_Interna']
-                    else:
-                        df_export_no_bal['Moneda_Anterior'] = ''
-                    
-                    # Crear columna Inconsistencia desde Detalle_Inconsistencia
-                    if 'Detalle_Inconsistencia' in df_export_no_bal.columns:
-                        df_export_no_bal['Inconsistencia_Final'] = df_export_no_bal['Detalle_Inconsistencia']
-                    else:
-                        df_export_no_bal['Inconsistencia_Final'] = ''
-                    
-                    # Agregar columna Sobreescribir
-                    def calcular_sobreescribir(row):
-                        flag = str(row.get('Flag', row.get('Semáforo', ''))).strip().upper()
-                        return 'n' if flag == 'ERROR' else 'y'
-                    
-                    df_export_no_bal['Sobreescribir'] = df_export_no_bal.apply(calcular_sobreescribir, axis=1)
-                    
-                    # IMPORTANTE: Eliminar columna SubMoneda original para evitar duplicados
-                    # (ya guardamos su valor en Moneda_Anterior)
-                    if 'SubMoneda' in df_export_no_bal.columns:
-                        df_export_no_bal = df_export_no_bal.drop(columns=['SubMoneda'])
-                    
-                    # Seleccionar y renombrar columnas finales
-                    columnas_finales = {
-                        'ID': 'ID',
-                        'Instrumento': 'Instrumento',
-                        'SubMoneda_Nueva': 'SubMoneda',  # La moneda calculada (nueva)
-                        'Moneda_Anterior': 'Moneda_Anterior',  # La moneda vieja de BD
-                        'Inconsistencia_Final': 'Inconsistencia',
-                        'Sobreescribir': 'Sobreescribir'
-                    }
-                    
-                    # Renombrar
-                    df_export_no_bal = df_export_no_bal.rename(columns=columnas_finales)
-                    
-                    # Seleccionar columnas finales en el orden correcto
-                    cols_disponibles = ['ID', 'Instrumento', 'SubMoneda', 'Moneda_Anterior', 'Inconsistencia', 'Sobreescribir']
-                    cols_presentes = [c for c in cols_disponibles if c in df_export_no_bal.columns]
-                    df_export_no_bal = df_export_no_bal[cols_presentes]
-                    
-                    excel_no_bal = to_excel(df_export_no_bal)
-                    
-                    st.download_button(
-                        label="⬇️ Descargar No Balanceados",
-                        data=excel_no_bal,
-                        file_name=f"no_balanceados_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_no_bal"
-                    )
-                    st.success(f"✅ {len(no_balanceados)} instrumentos no balanceados listos para descargar")
+                        st.info("No hay instrumentos no balanceados con FLAG Caso_1, Caso_2 o Caso_3.")
                 else:
                     st.info("No hay instrumentos no balanceados en la selección actual.")
             except Exception as e:
