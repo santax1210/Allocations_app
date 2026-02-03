@@ -1,0 +1,49 @@
+================================================================================
+REGIONES SIN MAPEO (2):
+================================================================================
+  - 'peopleã¢â¬â¢s_republic_of_china'
+  - 'tãâ¼rkiye'
+
+================================================================================
+REGIONES CON MAPEO (33):
+================================================================================
+  'Africa Eme.' -> 'Africa Eme.'
+  'Africa Front.' -> 'Africa Front.'
+  'Asia Des.' -> 'Asia Des.'
+  'Asia Eme.' -> 'Asia Eme.'
+  'Asia Front.' -> 'Asia Front.'
+  'Chile' -> 'Chile'
+  'Europa Des.' -> 'Europa Des.'
+  'Europa Eme.' -> 'Europa Eme.'
+  'Europa Front.' -> 'Europa Front.'
+  'Latam Eme.' -> 'Latam Eme.'
+  'Latam Front.' -> 'Latam Front.'
+  'M. Oriente Eme.' -> 'M. Oriente Eme.'
+  'M. Oriente Front.' -> 'M. Oriente Front.'
+  'N/A' -> 'N/A'
+  'Norteamerica' -> 'Norteamerica'
+  'OceanÃ­a' -> 'Oceanía'
+  'apac_(ex_japan)_fi' -> 'Asia Des.'
+  'australia_&_new_zealand' -> 'Oceanía'
+  'azerbaijan' -> 'Asia Eme.'
+  'cash/equiv' -> 'Otros'
+  'cash_&_forwards' -> 'Otros'
+  'emerging_market_fi' -> 'Global Eme.'
+  'europe_eq' -> 'Europa Des.'
+  'europe_fi' -> 'Europa Des.'
+  'faroe_islands' -> 'Europa Des.'
+  'honduras' -> 'Latam Front.'
+  'mexice' -> 'Latam Eme.'
+  'middle_east_&_africa' -> 'Africa Eme.'
+  'north_america_fi' -> 'Norteamerica'
+  'otros' -> 'Otros'
+  'technology' -> 'Temáticos'
+  'uzbekistan' -> 'Asia Eme.'
+  'world' -> 'Globales'
+
+================================================================================
+RESUMEN:
+  Total columnas: 35
+  Con mapeo: 33
+  Sin mapeo: 2
+================================================================================

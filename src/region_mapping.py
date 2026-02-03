@@ -14,9 +14,9 @@ REGION_MAP_REFINITIV_TO_INTERNAL = {
     "asia eme.": "Asia Eme.",
     "asia front.": "Asia Front.",
     "apac_(ex_japan)_fi": "Asia Des.",
-    "people’s_republic_of_china": "Asia Eme.",
     "people's_republic_of_china": "Asia Eme.",
     "peopleâ€™s_republic_of_china": "Asia Eme.", # Encoding artifact handling
+    "peopleã¢â\x82¬â\x84¢s_republic_of_china": "Asia Eme.", # Exact CSV encoding
     "uzbekistan": "Asia Eme.",
     "azerbaijan": "Asia Eme.",
     
@@ -45,6 +45,7 @@ REGION_MAP_REFINITIV_TO_INTERNAL = {
     "türkiye": "M. Oriente Eme.",
     "turkiye": "M. Oriente Eme.",
     "tãƒâ¼rkiye": "M. Oriente Eme.",
+    "tã\x83â¼rkiye": "M. Oriente Eme.", # Exact CSV encoding
     
     # NORTEAMERICA
     "norteamerica": "Norteamerica",
