@@ -317,19 +317,30 @@ def calcular_flag_cambio(row):
     if not moneda_antigua or moneda_antigua in ['', 'NAN', 'NONE']:
         return "Caso_1"
     
+    # --- Lógica para Export NO BALANCEADOS (Moneda_Calculada != 'BALANCEADO') ---
+    if moneda_calculada != 'BALANCEADO':
+        # Caso_2: Balanceado (Maestro) → Moneda específica (Calculada)
+        if moneda_antigua == 'BALANCEADO':
+            return "Caso_2"
+        
+        # Caso_3: Moneda específica A → Moneda específica B
+        if moneda_antigua != moneda_calculada:
+            return "Caso_3"
+            
+        # Caso_1: Moneda A → Moneda A (Misma moneda)
+        if moneda_antigua == moneda_calculada:
+            return "Caso_1"
+
+    # --- Lógica para Export BALANCEADOS (Moneda_Calculada == 'BALANCEADO') ---
     # Balanceado a Balanceado (sin cambio)
-    if moneda_antigua == 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
+    if moneda_antigua == 'BALANCEADO':
         return "Caso_1"
     
     # Moneda específica a Balanceado (cambio a balanceado)
-    if moneda_antigua != 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
+    if moneda_antigua != 'BALANCEADO':
         return "Caso_2"
     
-    # Misma moneda (sin cambio)
-    if moneda_antigua == moneda_calculada:
-        return "Caso_1"
-    
-    # Cualquier otro caso (no debería llegar aquí en export Balanceados)
+    # Fallback por defecto
     return "Caso_1"
 
 def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
@@ -398,8 +409,54 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
                     try:
                         df_alloc_agrupado = df_alloc_escalado.groupby(['ID', 'currency_code'])[pct_col].sum().reset_index()
                         df_alloc_wide = df_alloc_agrupado.pivot(index='ID', columns='currency_code', values=pct_col)
-                        logger.info(f"[EXPORT DEBUG] Pivot exitoso. Columnas de monedas: {list(df_alloc_wide.columns)}")
-                        logger.info(f"[EXPORT DEBUG] Número de instrumentos con allocations: {len(df_alloc_wide)}")
+                        
+                        # NUEVA LÓGICA: Redondeo a 4 dígitos totales y ajuste a 100%
+                        def redondear_4_digitos(x):
+                            if pd.isna(x) or x == 0:
+                                return x
+                            # Obtener longitud de la parte entera
+                            enteros = len(str(int(abs(x))))
+                            # Calcular decimales permitidos para llegar a 4 dígitos totales
+                            # Ejemplo: 22.34 (2 enteros + 2 decimales = 4), 1.335 (1 entero + 3 decimales = 4)
+                            decimales = max(0, 4 - enteros)
+                            return round(x, decimales)
+
+                        def ajustar_fila_100_porc(row, columnas_monedas):
+                            valores = row[columnas_monedas].copy()
+                            # Solo procesar si hay algún valor no-nulo
+                            if valores.isna().all() or (valores == 0).all():
+                                return row
+                            
+                            # 1. Redondear individualmente a 4 dígitos totales
+                            redondeados = valores.apply(redondear_4_digitos)
+                            
+                            # 2. Calcular error vs 100.0
+                            suma_actual = redondeados.sum()
+                            error = 100.0 - suma_actual
+                            
+                            # 3. Ajustar el valor más grande para compensar el error de redondeo
+                            if abs(error) > 1e-9:
+                                idx_max = redondeados.idxmax()
+                                # Sumamos el error al valor dominante
+                                nuevo_valor = redondeados[idx_max] + error
+                                # Redondear el ajuste final a 4 decimales para evitar problemas de punto flotante
+                                redondeados[idx_max] = round(nuevo_valor, 4)
+                            
+                            row[columnas_monedas] = redondeados
+                            return row
+
+                        # Aplicar ajuste solo a instrumentos con Total_Pct_Ext >= 40%
+                        monedas_cols = [c for c in df_alloc_wide.columns]
+                        mask_escalar = totales_pct[totales_pct['Total_Pct_Ext'] >= 40]['ID'].values
+                        
+                        # Filtrar df_alloc_wide por IDs que cumplen la condición de escalado
+                        indices_a_ajustar = df_alloc_wide.index.intersection(mask_escalar)
+                        if len(indices_a_ajustar) > 0:
+                            df_alloc_wide.loc[indices_a_ajustar] = df_alloc_wide.loc[indices_a_ajustar].apply(
+                                lambda r: ajustar_fila_100_porc(r, monedas_cols), axis=1
+                            )
+                        
+                        logger.info(f"[EXPORT DEBUG] Redondeo a 4 dígitos y ajuste a 100% completado")
                         
                         # Guardar totales_pct para merge posterior
                         df_alloc_wide = df_alloc_wide.merge(totales_pct, left_index=True, right_on='ID', how='left')
