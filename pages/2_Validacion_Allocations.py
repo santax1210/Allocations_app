@@ -264,14 +264,38 @@ st.dataframe(
 # 4. Exportación
 st.markdown("### 📤 Exportar Datos")
 
+# ============================================================================
+# FUNCIONES AUXILIARES PARA EXPORTS
+# ============================================================================
+
+def calcular_estado(row):
+    """
+    Calcula Estado basado en Total_Pre_Escalado para export de Balanceados.
+    
+    Returns:
+        - "ERROR": Total_Pre_Escalado < 40% (cobertura insuficiente)
+        - "Revisión": 40% <= Total_Pre_Escalado <= 60% o > 120% (cobertura baja o excesiva)
+        - "Validado": 60% < Total_Pre_Escalado <= 120% (cobertura óptima)
+    """
+    total_pre = row.get('Total_Pre_Escalado', 0)
+    
+    if total_pre < 40:
+        return "ERROR"
+    elif total_pre <= 60:
+        return "Revisión"
+    elif total_pre <= 120:
+        return "Validado"
+    else:  # > 120%
+        return "Revisión"
+
 def calcular_flag_cambio(row):
     """
     Calcula FLAG basado en cambio entre Moneda_Anterior/Moneda_Interna y Moneda_Calculada.
     
-    Returns:
-        - Caso_1: Balanceado → Balanceado, o Moneda → Misma Moneda
-        - Caso_2: Moneda → Balanceado, o Balanceado → Moneda
-        - Caso_3: Moneda → Otra Moneda
+    Para export de Balanceados (Moneda_Calculada = "balanceado"):
+        - Caso_1: Balanceado → Balanceado (sin cambio)
+        - Caso_2: Moneda específica → Balanceado (cambio a balanceado)
+        - Caso_3: Balanceado en maestro pero sin allocations internas (Moneda: = FALTA ALLOCATION)
     """
     # Intentar obtener moneda antigua de diferentes columnas posibles
     # NOTA: NO usar SubMoneda porque tiene significados diferentes según contexto
@@ -284,28 +308,29 @@ def calcular_flag_cambio(row):
     
     moneda_calculada = str(row.get('Moneda_Calculada', '')).strip().upper()
     
-    # Si no encontramos moneda antigua, retornar Caso_3 por defecto
-    if not moneda_antigua or moneda_antigua in ['', 'NAN', 'NONE']:
+    # Verificar si es Caso_3: Balanceado en maestro pero sin allocations internas
+    moneda_metadata = str(row.get('Moneda:', '')).strip().upper()
+    if moneda_antigua == 'BALANCEADO' and moneda_metadata == 'FALTA ALLOCATION':
         return "Caso_3"
     
-    # Balanceado a Balanceado
+    # Si no encontramos moneda antigua, retornar Caso_1 por defecto
+    if not moneda_antigua or moneda_antigua in ['', 'NAN', 'NONE']:
+        return "Caso_1"
+    
+    # Balanceado a Balanceado (sin cambio)
     if moneda_antigua == 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
         return "Caso_1"
     
-    # Moneda a Balanceado
+    # Moneda específica a Balanceado (cambio a balanceado)
     if moneda_antigua != 'BALANCEADO' and moneda_calculada == 'BALANCEADO':
         return "Caso_2"
     
-    # Balanceado a Moneda
-    if moneda_antigua == 'BALANCEADO' and moneda_calculada != 'BALANCEADO':
-        return "Caso_2"
-    
-    # Misma moneda
+    # Misma moneda (sin cambio)
     if moneda_antigua == moneda_calculada:
         return "Caso_1"
     
-    # Moneda diferente
-    return "Caso_3"
+    # Cualquier otro caso (no debería llegar aquí en export Balanceados)
+    return "Caso_1"
 
 def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
     """
@@ -562,13 +587,6 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         # Eliminar columnas que causarían duplicados
         df_export = df_export.drop(columns=cols_to_drop, errors='ignore')
         
-        # Calcular columna Sobreescribir basada en Total_Pct_Ext
-        def calcular_sobreescribir(row):
-            total_pct = row.get('Total_Pct_Ext', 0)
-            return 'y' if total_pct >= 40 else 'n'
-        
-        df_export['Sobreescribir'] = df_export.apply(calcular_sobreescribir, axis=1)
-        
         # Renombrar columnas al formato estricto solicitado
         col_mapping = {
             'ID': 'ID',
@@ -585,7 +603,8 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         
         # 5. Seleccionar columnas en orden prioritario (sin duplicados)
         # FLAG y Total_Pre_Escalado deben estar si existen en df_export
-        base_cols = ['ID', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'Moneda_Anterior', 'Flag', 'Total_Pre_Escalado', 'Sobreescribir']
+        # Sobreescribir se agregará manualmente en cada export según sea necesario
+        base_cols = ['ID', 'Instrumento', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'Moneda_Anterior', 'Flag', 'Total_Pre_Escalado']
         
         # Identificar columnas de allocations (las que estaban en df_alloc_wide)
         alloc_cols = list(df_alloc_wide.columns) if not df_alloc_wide.empty else []
@@ -678,8 +697,8 @@ if tipo_validacion == "Moneda":
                     balanceados_con_flag = balanceados.copy()
                     balanceados_con_flag['Flag'] = balanceados_con_flag.apply(calcular_flag_cambio, axis=1)
                     
-                    # Filtrar solo Caso_1 y Caso_2 para balanceados
-                    balanceados_con_flag = balanceados_con_flag[balanceados_con_flag['Flag'].isin(['Caso_1', 'Caso_2'])]
+                    # Filtrar solo Caso_1, Caso_2 y Caso_3 para balanceados
+                    balanceados_con_flag = balanceados_con_flag[balanceados_con_flag['Flag'].isin(['Caso_1', 'Caso_2', 'Caso_3'])]
                     
                     if not balanceados_con_flag.empty:
                         # Usar la función de exportación completa (con allocations)
@@ -703,20 +722,36 @@ if tipo_validacion == "Moneda":
                         pipeline_obj = PipelineMock(df_alloc_ext)
                         df_export_bal = preparar_dataframe_exportacion(balanceados_con_flag, pipeline_obj, tipo_validacion)
                         
-                        # Reordenar columnas para poner Flag y Total_Pre_Escalado después de Moneda_Anterior
+                        # Calcular columna Estado basada en Total_Pre_Escalado
+                        if 'Total_Pre_Escalado' in df_export_bal.columns:
+                            df_export_bal['Estado'] = df_export_bal.apply(calcular_estado, axis=1)
+                        
+                        # Reordenar columnas: Flag → Estado → Total_Pre_Escalado
                         cols = list(df_export_bal.columns)
+                        
+                        # Eliminar columnas que no deben estar en el export de Balanceados
+                        columnas_a_eliminar = ['Total_Pct_Ext', 'Sobreescribir']
+                        for col in columnas_a_eliminar:
+                            if col in cols:
+                                cols.remove(col)
+                        
+                        # Reordenar: Flag después de Moneda_Anterior
                         if 'Flag' in cols and 'Moneda_Anterior' in cols:
                             cols.remove('Flag')
                             idx = cols.index('Moneda_Anterior') + 1
                             cols.insert(idx, 'Flag')
-                        if 'Total_Pre_Escalado' in cols and 'Flag' in cols:
-                            cols.remove('Total_Pre_Escalado')
-                            idx = cols.index('Flag') + 1
-                            cols.insert(idx, 'Total_Pre_Escalado')
                         
-                        # Asegurar que solo tengamos las columnas correctas (sin Total_Pct_Ext)
-                        if 'Total_Pct_Ext' in cols:
-                            cols.remove('Total_Pct_Ext')
+                        # Reordenar: Estado después de Flag
+                        if 'Estado' in cols and 'Flag' in cols:
+                            cols.remove('Estado')
+                            idx = cols.index('Flag') + 1
+                            cols.insert(idx, 'Estado')
+                        
+                        # Reordenar: Total_Pre_Escalado después de Estado
+                        if 'Total_Pre_Escalado' in cols and 'Estado' in cols:
+                            cols.remove('Total_Pre_Escalado')
+                            idx = cols.index('Estado') + 1
+                            cols.insert(idx, 'Total_Pre_Escalado')
                         
                         df_export_bal = df_export_bal[cols]
                         

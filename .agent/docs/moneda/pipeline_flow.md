@@ -92,34 +92,11 @@ Para cada instrumento:
 - `Total_Pct_Ext`: Suma de porcentajes externos
 - `Es_Balanceado`: Flag booleano
 
----
-
-### PASO 6: Validación de Inconsistencias
-**Entrada:** Instrumentos clasificados  
-**Salida:** Resultados finales de validación  
-**Proceso:**
-1. Comparar `Moneda_Calculada` vs `Moneda_Interna`
-2. Generar `Detalle_Inconsistencia` si difieren
-3. Renombrar columnas para export:
-   - `Nombre` → `Instrumento`
-   - etc.
-
-**Columnas Clave de Salida:**
-- `ID`
-- `Instrumento`
-- `Moneda_Calculada`
-- `Moneda_Interna`
-- `Detalle_Inconsistencia`
-- `Total_Pct_Ext`
-- `Moneda_Interna`
-
-**Nota:** El `Flag` se calcula en la fase de export, no en el pipeline.
-
 **Guardado en:** `st.session_state.df_final_moneda`
 
 ---
 
-### PASO 7: Calcular Total Pre-Escalado y Escalar Allocations
+### PASO 6: Calcular Total Pre-Escalado y Escalar Allocations
 **Entrada:** `df_final_moneda`, `df_alloc_ext_moneda`  
 **Salida:** `df_alloc_ext_escalado` con porcentajes normalizados  
 **Proceso:**
@@ -166,11 +143,10 @@ Para cada instrumento:
 3. Calcular `Fecha` (último día del mes anterior)
 4. Establecer `Clasificacion = "SubMoneda"`
 5. Corregir `Id_ti` e `Id_ti_valor` para usar solo RIC/Isin
-6. Combinar `Detalle_Inconsistencia` y `Detalle_Validacion` en una sola `Inconsistencia`
-7. Seleccionar y renombrar columnas
+6. Seleccionar y renombrar columnas
 
 **Columnas de Salida:**
-- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, moneda_antigua, Flag, Inconsistencia
+- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, Moneda_Anterior, Moneda_Calculada
 - Columnas de monedas: USD, CLP, EUR, etc. (del pivot)
 
 ---
@@ -181,7 +157,7 @@ Para cada instrumento:
 **Propósito:** Actualizar base de datos con instrumentos clasificados como balanceados
 
 **Columnas principales:**
-- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, moneda_antigua, Flag, Inconsistencia, **Sobreescribir**
+- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, Moneda_Anterior, Flag, Estado, Total_Pre_Escalado, Total, + columnas de monedas
 - Columnas de monedas: USD, CLP, EUR, etc.
 
 **Archivo:** `Balanceados_Moneda.xlsx`
@@ -196,8 +172,9 @@ Para cada instrumento:
 - `Instrumento`: Nombre del instrumento
 - `SubMoneda`: **Moneda_Calculada** (valor nuevo a actualizar)
 - `Moneda_Anterior`: **SubMoneda/Moneda_Interna** (valor viejo)
-- `Inconsistencia`: Detalles del error o vacío
-- `Sobreescribir`: "y" o "n" (basado en Flag)
+- `Flag`: Tipo de cambio (Caso_1, Caso_2, Caso_3)
+- `Estado`: "ERROR", "Revisión", o "Validado" (basado en Total_Pre_Escalado, solo Balanceados)
+- `Sobreescribir`: "y" o "n" (solo No Balanceados)
 
 **Propósito:** Actualizar campo SubMoneda en base de datos con nueva moneda calculada
 

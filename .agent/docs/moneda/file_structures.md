@@ -185,6 +185,7 @@ El archivo se lee en formato **ancho** (wide format) pero se transforma inmediat
 | `Moneda_Interna` | Maestro Instrumentos (campo SubMoneda) | Moneda actual en base de datos |
 | `Total_Pct_Ext` | Calculado desde Allocations Externos | Suma de % de allocations externas |
 | `Total_Pre_Escalado` | Calculado en pipeline | Suma de % antes del escalado (solo export Balanceados) |
+| `Estado` | Calculado en export | Clasificación de calidad de allocations (ERROR/Revisión/Validado, solo export Balanceados) |
 | `Flag` | Calculado en export | Estado de cambio (Caso_1, Caso_2, Caso_3) entre Moneda_Anterior y SubMoneda |
 | Columnas de monedas (USD, CLP, etc.) | Pivoteado desde Allocations Externos | Porcentajes individuales por moneda (escalados a 100%) |
 
