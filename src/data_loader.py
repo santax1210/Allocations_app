@@ -91,7 +91,7 @@ class DataLoader:
             DataFrame en formato largo (una fila por instrumento-moneda)
         """
         if filepath is None:
-            filepath = self.data_path / "allocations.csv"
+            filepath = self.data_path / "allocations_currency.csv"
         
         logger.info(f"Cargando Allocations Internos desde: {filepath}")
         

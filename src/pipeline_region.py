@@ -139,8 +139,14 @@ class ConciliacionPipelineRegion:
         logger.info("PASO 3 (Región): Filtrando por tipo de instrumento")
         
         # Primero extraer instrumentos únicos del cruce de posiciones
-        columnas_instrumento = ['ID', 'Nombre', 'Cusip', 'Isin', 'RIC', 'Tipo instrumento', 'SubMoneda', 'Id_ti', 'Id_ti_valor']
-        df_instrumentos = df_cruzado[columnas_instrumento].drop_duplicates(subset=['Cusip', 'Isin'], keep='first').copy()
+        # Primero extraer instrumentos únicos del cruce de posiciones
+        # IMPORTANTE: Incluir 'base-region' y 'Base Región:' para la lógica de Region_Anterior
+        columnas_instrumento = ['ID', 'Nombre', 'Cusip', 'Isin', 'RIC', 'Tipo instrumento', 'SubMoneda', 'Id_ti', 'Id_ti_valor', 'base-region', 'Base Región:']
+        
+        # Verificar existencia antes de filtrar (columns_instrumento puede tener columnas que no están en df_cruzado)
+        cols_existentes = [c for c in columnas_instrumento if c in df_cruzado.columns]
+        
+        df_instrumentos = df_cruzado[cols_existentes].drop_duplicates(subset=['Cusip', 'Isin'], keep='first').copy()
         
         df_filtrado = df_instrumentos[
             df_instrumentos['Tipo instrumento'].isin(self.tipos_filtro)
@@ -293,6 +299,10 @@ class ConciliacionPipelineRegion:
             internal_data = self.allocations_interno[internal_cols].copy()
             internal_data['ID'] = internal_data['ID'].astype(str)
             
+            # Deduplicar por ID (ya que allocations_interno puede venir en formato largo/melted)
+            # Solo nos importa el atributo 'Base Región:' que es constante para el ID
+            internal_data = internal_data.drop_duplicates(subset=['ID'])
+            
             # Merge
             df_resultado = df_resultado.merge(internal_data, on='ID', how='left')
         else:
@@ -372,77 +382,30 @@ class ConciliacionPipelineRegion:
         
         df_clasificacion['Flag'] = df_clasificacion.apply(generar_flag, axis=1)
         
-        # Calcular Region_Antigua (región dominante interna)
+        # Calcular Region_Antigua (región dominante interna -> base-region del maestro)
         def calcular_region_antigua(row):
-            """Calcular región dominante desde allocations internas"""
-            max_val = 0
-            max_region = None
+            """
+            Obtener región interna directamente del maestro de instrumentos (columna 'base-region').
+            Similar a Moneda_Interna en pipeline de moneda.
+            Busca variantes de nombre: 'base-region', 'Base Region', 'Base Región:'.
+            """
+            possible_cols = ['base-region', 'Base Region', 'Base Región:']
+            region_maestro = ''
             
-            if self.region_columns:
-                for col in self.region_columns:
-                    val = row.get(col, 0)
-                    try:
-                        val = float(val) if pd.notna(val) and val != '' else 0.0
-                    except:
-                        val = 0.0
-                    
-                    if val > max_val:
-                        max_val = val
-                        max_region = col
+            for col in possible_cols:
+                if col in row:
+                    val = str(row.get(col, '')).strip()
+                    if val and val.upper() not in ['NAN', 'NONE']:
+                        region_maestro = val
+                        break
             
-            # Aplicar umbral 90%
-            if max_val >= 90.0 and max_region:
-                return max_region
-            else:
-                return 'balanceado'
+            return region_maestro
         
         df_clasificacion['Region_Antigua'] = df_clasificacion.apply(calcular_region_antigua, axis=1)
         
-        # Detectar inconsistencias (comparar base-region vs Region_Antigua INTERNA)
-        def detectar_inconsistencia(row):
-            """
-            Detectar inconsistencias según documentación:
-            Compara base-region (catálogo) vs Region_Antigua (calculada desde allocations INTERNAS)
-            
-            1. BALANCEADO sin allocations
-            2. BALANCEADO pero región dominante interna
-            3. Región específica pero balanceado interno
-            4. Región incorrecta vs interna
-            """
-            base_region = str(row.get('base-region', '')).strip().upper()
-            region_antigua = str(row.get('Region_Antigua', '')).strip()  # Calculada desde INTERNAS
-            base_estrategia = str(row.get('Base Región:', '')).strip().upper()
-            
-            # Caso 1: BALANCEADO sin allocations
-            if base_region == 'BALANCEADO' and base_estrategia == 'FALTA ALLOCATION':
-                return "Definido como BALANCEADO pero no tiene allocations internas"
-            
-            # Caso 2: BALANCEADO pero región dominante en allocations internas
-            if base_region == 'BALANCEADO' and region_antigua != 'balanceado':
-                # Region_Antigua tiene el nombre de la región dominante si >= 90%
-                return f"Definido como BALANCEADO pero {region_antigua} domina en allocations internas"
-            
-            # Caso 3: Región específica pero balanceado en allocations internas
-            if base_region != 'BALANCEADO' and base_region != '' and region_antigua == 'balanceado':
-                return f"Definido como {base_region} pero es balanceado en allocations internas"
-            
-            # Caso 4: Región incorrecta vs allocations internas
-            if (base_region != 'BALANCEADO' and base_region != '' and 
-                region_antigua != 'balanceado' and 
-                base_region != region_antigua.upper()):
-                return f"Definido como {base_region} pero {region_antigua} domina en allocations internas"
-            
-            return ''  # Sin inconsistencia
-            
-            return ''  # Sin inconsistencia
-        
-        df_clasificacion['Detalle_Inconsistencia'] = df_clasificacion.apply(detectar_inconsistencia, axis=1)
-        
-        # Marcar si tiene inconsistencia
-        df_clasificacion['Inconsistencia'] = df_clasificacion['Detalle_Inconsistencia'] != ''
+        # (Lógica de inconsistencia eliminada a petición del usuario)
         
         logger.info(f"Validación completada. Flags: {df_clasificacion['Flag'].value_counts().to_dict()}")
-        logger.info(f"Inconsistencias detectadas: {df_clasificacion['Inconsistencia'].sum()}")
         
         return df_clasificacion
 
@@ -510,7 +473,7 @@ class ConciliacionPipelineRegion:
             
         df_alloc_ext_agrupado = self.paso_4_obtener_allocations_externo(df_filtrado)
         
-        # Guardar para uso externo
+        # Guardar para uso externo (RAW DATA, NO ESCALADA)
         self.df_alloc_ext = df_alloc_ext_agrupado
         
         df_clasif = self.paso_5_identificar_region_principal(df_filtrado, df_alloc_ext_agrupado)
@@ -519,9 +482,14 @@ class ConciliacionPipelineRegion:
         # PASO 7: Escalar allocations (solo para instrumentos con Flag != ERROR)
         df_alloc_ext_escalado = self.paso_7_escalar_allocations(df_final, df_alloc_ext_agrupado)
         
+        # Renombrar 'Nombre' a 'Instrumento' para consistencia con UI
+        if 'Nombre' in df_final.columns:
+            df_final = df_final.rename(columns={'Nombre': 'Instrumento'})
+        
         # Guardar ambos para uso externo
-        self.df_alloc_ext_agrupado = df_alloc_ext_escalado  # Usar el escalado para exports
-        self.df_alloc_ext = df_alloc_ext_escalado  # Compatibilidad
+        self.df_alloc_ext_agrupado = df_alloc_ext_escalado  # Usar el escalado para visualizaciones que requieran suma 100%
+        # IMPORTANTE: No sobrescribir self.df_alloc_ext con datos escalados si queremos mostrar sumas originales en UI
+        # self.df_alloc_ext = df_alloc_ext_escalado  <-- LINEA ELIMINADA PARA FIX
         
         estadisticas = {
             'total_instrumentos': len(df_final),
@@ -529,7 +497,6 @@ class ConciliacionPipelineRegion:
             'balanceados': len(df_final[df_final['Region_Calculada'] == 'balanceado']),
             'no_balanceados': len(df_final[df_final['Region_Calculada'] != 'balanceado']),
             'flag': df_final['Flag'].value_counts().to_dict() if 'Flag' in df_final.columns else {},
-            'inconsistencias': df_final['Inconsistencia'].sum() if 'Inconsistencia' in df_final.columns else 0,
             'instrumentos_escalados': len(df_final[df_final['Flag'] != 'ERROR'])
         }
         

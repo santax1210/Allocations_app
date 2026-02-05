@@ -37,15 +37,25 @@
 
 ## Lógica de Flag (Semáforo)
 
-**Propósito:** Validar la calidad de cobertura de allocations  
-**Basado en:** `Total_Pct_Ext` (suma de porcentajes de allocations externas)
+**Propósito:** Identificar el tipo de cambio entre la región anterior y la calculada.
+**Basado en:** Comparación entre `Region_Anterior` y `Region_Calculada`.
 
 **Reglas:**
-- **60% - 120%** → `VALIDO` (verde)
-- **40% - 60%** O **> 120%** → `REVISION` (amarillo)
-- **< 40%** → `ERROR` (rojo)
+(Ver definición detallada de Casos abajo)
 
-**Código de Referencia:** `src/pipeline_region.py` (misma lógica que monedas)
+**Casos de Flag (Semáforo de Cambio):**
+
+**A. Contexto Balanceados (`Region_Calculada` == "balanceado"):**
+- **Caso 1 (Confirmación):** `Region_Anterior` era "balanceado" -> Sigue "balanceado". (Sin cambio).
+- **Caso 2 (Cambio a Balanceado):** `Region_Anterior` era una Región Específica -> Ahora es "balanceado".
+- **Caso 3 (Inconsistencia Histórica):** `Region_Anterior` era "balanceado" pero `Base Región` dice "FALTA ALLOCATION".
+
+**B. Contexto No Balanceados (`Region_Calculada` != "balanceado"):**
+- **Caso 1 (Confirmación):** `Region_Anterior` era misma Región A -> Sigue Región A. (Sin cambio).
+- **Caso 2 (Cambio a Región):** `Region_Anterior` era "balanceado" -> Ahora es Región Específica.
+- **Caso 3 (Cambio de Región):** `Region_Anterior` era Región A -> Ahora es Región B.
+
+**Justificación:**
 
 **Justificación:**
 - 60-120%: Buena cobertura (permite redondeo/problemas de calidad de datos)
@@ -114,8 +124,31 @@ Allocations escaladas:
 **Para Validación de Región:**
 - `Clasificacion` = Texto literal **"base-region"**
 
-**Diferencia con Monedas:**
-- Monedas usa: `Clasificacion = "SubMoneda"`
+---
+
+## Estado de Validación (Nueva Lógica)
+
+**Campo:** `Estado`  
+**Basado en:** `Total_Pre_Escalado` (Suma de % allocation RAW, sin escalar) o `Flag`.
+
+**Reglas:**
+**Reglas de Validación (Porcentajes):**
+- **Validado**: Total entre 60% y 120%.
+- **Revisión**: Total entre 40% y 60%, o mayor a 120%.
+- **ERROR**: Total menor a 40%.
+
+**Propósito:** Proporcionar un estado claro de la calidad del dato para el dashboard de gestión.
+
+---
+
+## Total Pre-Escalado
+
+**Definición:** Suma de los porcentajes de allocation *antes* de cualquier normalización matematica.
+**Importancia:** Es la métrica real de calidad de datos.
+**Regla de Negocio:**
+- Se debe calcular usando los datos `RAW` del pipeline (`df_alloc_ext`).
+- NO se debe usar el dataframe final agrupado que podría tener redondeos.
+- Es la base para el cálculo del semáforo/Flag.
 ## División de Exports: Balanceado / No Balanceado / Sin Datos
 
 **Criterio de División:** Valor de `Region_Calculada`
@@ -131,7 +164,7 @@ Allocations escaladas:
 - **Significado:** Ninguna región supera el 90%
 - **Export:** Formato completo con todas las columnas de regiones
 - **Archivo:** `Balanceados_Region.xlsx`
-- **Columnas:** ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag, Inconsistencia, + todas las columnas de regiones (LATAM, ASIA, EUROPA, etc.)
+- **Columnas:** ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag, Estado, Total_Pre_Escalado, + todas las columnas de regiones (LATAM, ASIA, EUROPA, etc.)
 - **Propósito:** Actualizar base de datos con instrumentos clasificados como balanceados
 
 ### 2. Instrumentos No Balanceados
@@ -142,9 +175,16 @@ Allocations escaladas:
 - **Columnas:**
   - `ID`: Identificador interno
   - `Instrumento`: Nombre del instrumento
-  - `base-region`: Valor **NUEVO** (de `Region_Calculada`)
+  - `base-region`: Valor **NUEVO** (Región de Destino para actualizar BD)
   - `Region_Anterior`: Valor **VIEJO** (de allocations internas)
-  - `Inconsistencia`: Detalle del error o vacío
+  - `Flag`: Semáforo de cambio
+  - `Sobreescribir`: 'y' o 'n'
+
+> [!IMPORTANT]
+> **Doble Significado de `base-region`**:
+> - En el **Maestro de Instrumentos**, `base-region` es la región **ACTUAL/ORIGINAL**.
+> - En el **Export de No Balanceados**, la columna `base-region` contiene la **NUEVA REGIÓN** (calculada) que sobrescribirá el valor anterior.
+> - La región original se mueve a la columna `Region_Anterior` en el export.
 
 **Código de Referencia:** Similar a `pages/2_Validacion_Allocations.py` pero adaptado para región
 
@@ -166,56 +206,10 @@ Allocations escaladas:
 
 ---
 
-## Columna Inconsistencia
-
-**Origen:** Combina `Detalle_Inconsistencia` y `Detalle_Validacion`  
-**Lógica:**
-- Para validación de Región: Usar `Detalle_Validacion`
-- Muestra mensaje de error detallado si la validación falla
-- Vacío si no hay inconsistencia
-
-**Código de Referencia:** Similar a `pages/2_Validacion_Allocations.py` pero adaptado para región
-
-**Valores Comunes (adaptados a regiones):**
-- "Definido como BALANCEADO pero Norteamérica domina con 92.0%"
-- "Definido como LATAM pero es balanceado (máx 85.0%)"
-- "Definido como LATAM pero Asia domina con 91.0%"
-- String vacío (sin error)
-
----
-
-## Detección de Inconsistencias (Validación Interna)
-
-**Casos de Inconsistencia:**
-
-1. **BALANCEADO sin allocations:**
-   - `base-region = "BALANCEADO"` pero no hay allocations internas
-   - Mensaje: "Definido como BALANCEADO pero no tiene allocations internas"
-
-2. **BALANCEADO pero dominante:**
-   - `base-region = "BALANCEADO"` pero una región >= 90%
-   - Mensaje: "Definido como BALANCEADO pero {región} domina con {%}"
-   - Ejemplo: "Definido como BALANCEADO pero Norteamérica domina con 95.0%"
-
-3. **Región específica pero balanceado:**
-   - `base-region = {región}` pero ninguna región >= 90%
-   - Mensaje: "Definido como {región} pero es balanceado (máx {%})"
-   - Ejemplo: "Definido como LATAM pero es balanceado (máx 85.0%)"
-
-4. **Región incorrecta:**
-   - `base-region = {región_A}` pero `{región_B}` >= 90%
-   - Mensaje: "Definido como {región_A} pero {región_B} domina con {%}"
-   - Ejemplo: "Definido como LATAM pero Asia domina con 92.0%"
-
-**Código de Referencia:** Similar a `src/pipeline.py` líneas 604-663 pero adaptado para región
-
 ---
 
 ## Normalización de Regiones
 
-> [!WARNING]
-> **EN REVISIÓN**  
-> Pendiente determinar si es necesario realizar mapeo de nombres de regiones entre Refinitiv y sistema interno.
 
 **Estado Actual:**
 - Existe archivo `src/region_mapping.py` con mapeo de regiones
@@ -224,10 +218,7 @@ Allocations escaladas:
 
 **Código de Referencia:** `src/region_mapping.py`
 
-**Pendiente:**
-- Revisar si el mapeo actual es suficiente
-- Validar consistencia de nombres entre fuentes
-- Documentar mapeo completo si se confirma necesidad
+
 
 ---
 
@@ -243,7 +234,7 @@ Allocations escaladas:
 | **Valores de datos** | USD, CLP, EUR, etc. | LATAM, ASIA, EUROPA, etc. |
 | **Formato Allocations Externos** | Largo (long) | Ancho (wide) → transformado a largo |
 | **Umbral clasificación** | 90% | 90% (mismo) |
-| **Rangos Flag** | 60-120% VALIDO | 60-120% VALIDO (mismo) |
+| **Rangos Estado** | 60-120% VALIDO | 60-120% VALIDO (mismo) |
 | **Normalización** | `src/currency_mapping.py` | `src/region_mapping.py` (en revisión) |
 
 ---
@@ -252,7 +243,7 @@ Allocations escaladas:
 
 1. **Lógica Idéntica a Monedas:** La mayoría de las reglas son idénticas, solo cambian los nombres de columnas y valores
 2. **Umbral 90%:** Se mantiene el mismo umbral que en monedas para clasificación balanceado/no balanceado
-3. **Flags Idénticos:** Los rangos de validación (60-120% VALIDO, etc.) son los mismos
+3. **Estados de Validación Idénticos:** Los rangos de calidad (60-120% VALIDO, etc.) son los mismos que en monedas.
 4. **Exports Separados:** Igual que monedas, hay exports para balanceados y no balanceados
 5. **Formato de Entrada Diferente:** La diferencia principal está en que allocations externas vienen en formato ancho
-6. **Mapeo en Revisión:** Pendiente confirmar si el mapeo de regiones es necesario o suficiente
+

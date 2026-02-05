@@ -15,6 +15,7 @@ from pipeline import ConciliacionPipeline
 from pipeline_region import ConciliacionPipelineRegion
 from session_state import init_session_state
 from currency_mapping import CURRENCY_MAP_REFINITIV_TO_ISO
+from utils.logging_utils import log_df_status
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -124,6 +125,9 @@ if tipo_validacion == "Moneda":
             st.session_state.df_final_moneda = df_final
             st.session_state.stats_moneda = stats
             st.session_state.df_alloc_ext_moneda = pipeline.df_alloc_ext
+            
+            # Log estado inicial en UI
+            log_df_status(logger, df_final, "UI: Resultado Pipeline Moneda")
     
     df_display = st.session_state.df_final_moneda
     stats_display = st.session_state.stats_moneda
@@ -136,7 +140,10 @@ elif tipo_validacion == "Región":
             df_final, stats = pipeline.ejecutar_pipeline_completo()
             st.session_state.df_final_region = df_final
             st.session_state.stats_region = stats
-            st.session_state.df_alloc_ext_region = getattr(pipeline, 'df_alloc_ext_agrupado', pd.DataFrame())
+            st.session_state.df_alloc_ext_region = getattr(pipeline, 'df_alloc_ext', pd.DataFrame())
+
+            # Log estado inicial en UI
+            log_df_status(logger, df_final, "UI: Resultado Pipeline Región")
 
     df_display = st.session_state.df_final_region
     stats_display = st.session_state.stats_region
@@ -343,6 +350,57 @@ def calcular_flag_cambio(row):
     # Fallback por defecto
     return "Caso_1"
 
+def calcular_flag_cambio_region(row):
+    """
+    Calcula FLAG para Región basado en cambio entre Region_Anterior (calculada interna) y Region_Calculada.
+    
+    Lógica adaptada para Regiones:
+        - Caso_1: Balanceado -> Balanceado (sin cambio)
+        - Caso_2: Región específica -> Balanceado (cambio a balanceado)
+        - Caso_3: Balanceado (Maestro) pero allocations no existen (Base Región: = FALTA ALLOCATION)
+          (Nota: En region, 'Base Región:' actúa como el indicador de estado del allocation interno)
+    """
+    # Region_Anterior viene de 'Region_Antigua' (calculada desde allocations internas) o 'Region_Anterior' (en export)
+    region_anterior = str(row.get('Region_Antigua', row.get('Region_Anterior', ''))).strip().lower()
+    
+    # Region_Calculada viene del pipeline (externa)
+    region_calculada = str(row.get('Region_Calculada', '')).strip().lower()
+    
+    # Verificar Estado Allocations (Base Región:)
+    base_estrategia = str(row.get('Base Región:', '')).strip().upper()
+    
+    # Caso 3: Balanceado definido pero FALTA ALLOCATION
+    # Si base_region es BALANCEADO (o vacío/asumido) y strategy dice FALTA ALLOCATION
+    # O si Region_Anterior es balanceado y hay falta de allocation
+    if region_anterior == 'balanceado' and base_estrategia == 'FALTA ALLOCATION':
+        return "Caso_3"
+        
+    # --- Lógica Región NO BALANCEADOS ---
+    if region_calculada != 'balanceado' and region_calculada != 'Sin Datos':
+        # Caso_2: Balanceado -> Región específica
+        if region_anterior == 'balanceado':
+            return "Caso_2"
+            
+        # Caso_3: Región A -> Región B
+        if region_anterior != region_calculada:
+            return "Caso_3"
+            
+        # Caso_1: Región A -> Región A
+        if region_anterior == region_calculada:
+            return "Caso_1"
+
+    # --- Lógica Región BALANCEADOS ---
+    if region_calculada == 'balanceado':
+        # Caso_1: Balanceado -> Balanceado
+        if region_anterior == 'balanceado':
+            return "Caso_1"
+            
+        # Caso_2: Región específica -> Balanceado
+        if region_anterior != 'balanceado':
+            return "Caso_2"
+            
+    return "Caso_1"
+
 def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
     """
     Prepara el DataFrame para exportación replicando el formato antiguo solicitado.
@@ -352,6 +410,35 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         logger.info(f"[EXPORT DEBUG] preparar_dataframe_exportacion llamada con tipo_validacion='{tipo_validacion}'")
         df_export = df_final.copy()
         
+        # --- FUNCIONES DE REDONDEO (Moved up for reuse) ---
+        def redondear_4_digitos(x):
+            if pd.isna(x) or x == 0:
+                return x
+            enteros = len(str(int(abs(x))))
+            decimales = max(0, 4 - enteros)
+            return round(x, decimales)
+
+        def ajustar_fila_100_porc(row, columnas_items):
+            valores = row[columnas_items].copy()
+            if valores.isna().all() or (valores == 0).all():
+                return row
+            
+            # 1. Redondear individualmente
+            redondeados = valores.apply(redondear_4_digitos)
+            
+            # 2. Calcular error vs 100.0
+            suma_actual = redondeados.sum()
+            error = 100.0 - suma_actual
+            
+            # 3. Ajustar el valor más grande
+            if abs(error) > 1e-9:
+                idx_max = redondeados.idxmax()
+                nuevo_valor = redondeados[idx_max] + error
+                redondeados[idx_max] = round(nuevo_valor, 4)
+            
+            row[columnas_items] = redondeados
+            return row
+            
         # 1. Recuperar Allocations Externos en formato ancho (pivot)
         df_alloc_wide = pd.DataFrame()
         
@@ -468,32 +555,64 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
                         logger.error(traceback.format_exc())
                 
         elif tipo_validacion == "Región":
-             # Usar df_alloc_ext_agrupado del pipeline (Long format: ID, Region_Interna_Mapped, percentage_escalado)
-             logger.info(f"[EXPORT DEBUG] Verificando df_alloc_ext_agrupado para región...")
-             logger.info(f"[EXPORT DEBUG] hasattr(pipeline_obj, 'df_alloc_ext_agrupado'): {hasattr(pipeline_obj, 'df_alloc_ext_agrupado')}")
+             # Usar df_alloc_ext del pipeline (RAW DATA, Long format inside pipeline_region)
+             # Esto asegura que sumamos los porcentajes originales, no los escalados
+             logger.info(f"[EXPORT DEBUG] Verificando df_alloc_ext para región (RAW)...")
              
-             if hasattr(pipeline_obj, 'df_alloc_ext_agrupado'):
-                 logger.info(f"[EXPORT DEBUG] pipeline_obj.df_alloc_ext_agrupado existe")
-                 logger.info(f"[EXPORT DEBUG] Es None? {pipeline_obj.df_alloc_ext_agrupado is None}")
-                 if pipeline_obj.df_alloc_ext_agrupado is not None:
-                     logger.info(f"[EXPORT DEBUG] Empty? {pipeline_obj.df_alloc_ext_agrupado.empty}")
-                     logger.info(f"[EXPORT DEBUG] Tamaño: {len(pipeline_obj.df_alloc_ext_agrupado)} filas")
-             
-             if hasattr(pipeline_obj, 'df_alloc_ext_agrupado') and pipeline_obj.df_alloc_ext_agrupado is not None and not pipeline_obj.df_alloc_ext_agrupado.empty:
-                df_alloc_long = pipeline_obj.df_alloc_ext_agrupado.copy()
+             if hasattr(pipeline_obj, 'df_alloc_ext') and pipeline_obj.df_alloc_ext is not None and not pipeline_obj.df_alloc_ext.empty:
+                df_alloc_long = pipeline_obj.df_alloc_ext.copy()
                 
                 logger.info(f"[EXPORT DEBUG] df_alloc_ext_agrupado para región: {len(df_alloc_long)} filas")
                 logger.info(f"[EXPORT DEBUG] Columnas: {list(df_alloc_long.columns)}")
                 
                 # Asegurar que ID existe
                 if 'ID' in df_alloc_long.columns and 'Region_Interna_Mapped' in df_alloc_long.columns:
-                    # Usar percentage_escalado si existe, sino percentage_num
-                    pct_col = 'percentage_escalado' if 'percentage_escalado' in df_alloc_long.columns else 'percentage_num'
-                    logger.info(f"[EXPORT DEBUG] Usando columna: {pct_col}")
+                    # IMPLEMENTACIÓN DE ESCALADO Y REDONDEO PARA REGIÓN (Similar a Moneda)
                     
-                    df_alloc_long = df_alloc_long.groupby(['ID', 'Region_Interna_Mapped'])[pct_col].sum().reset_index()
-                    df_alloc_wide = df_alloc_long.pivot(index='ID', columns='Region_Interna_Mapped', values=pct_col)
+                    # 1. Calcular Total_Pct_Ext (Suma original de percentage_num)
+                    # Si no tenemos percentage_num, intentar usar la columna existente pero idealmente usar num
+                    pct_col_src = 'percentage_num' if 'percentage_num' in df_alloc_long.columns else 'percentage_escalado'
                     
+                    totales_pct = df_alloc_long.groupby('ID')[pct_col_src].sum().reset_index()
+                    totales_pct.rename(columns={pct_col_src: 'Total_Pct_Ext'}, inplace=True)
+                    totales_pct['ID'] = totales_pct['ID'].astype(str)
+                    
+                    # 2. Escalar proporcionalmente
+                    df_alloc_escalado = df_alloc_long.copy()
+                    df_alloc_escalado['ID'] = df_alloc_escalado['ID'].astype(str)
+                    df_alloc_escalado = df_alloc_escalado.merge(totales_pct, on='ID', how='left')
+                    
+                    def escalar_porcentaje_region(row, col_src):
+                        total = row.get('Total_Pct_Ext', 0)
+                        val = row.get(col_src, 0)
+                        if total >= 40:
+                            return (val / total) * 100
+                        else:
+                            return val
+
+                    df_alloc_escalado['percentage_final'] = df_alloc_escalado.apply(
+                        lambda r: escalar_porcentaje_region(r, pct_col_src), axis=1
+                    )
+                    
+                    # 3. Pivot
+                    df_alloc_agrupado = df_alloc_escalado.groupby(['ID', 'Region_Interna_Mapped'])['percentage_final'].sum().reset_index()
+                    df_alloc_wide = df_alloc_agrupado.pivot(index='ID', columns='Region_Interna_Mapped', values='percentage_final')
+                    
+                    # 4. Aplicar Redondeo y Ajuste a 100%
+                    columnas_regiones = [c for c in df_alloc_wide.columns]
+                    mask_escalar = totales_pct[totales_pct['Total_Pct_Ext'] >= 40]['ID'].values
+                    
+                    indices_a_ajustar = df_alloc_wide.index.intersection(mask_escalar)
+                    if len(indices_a_ajustar) > 0:
+                        df_alloc_wide.loc[indices_a_ajustar] = df_alloc_wide.loc[indices_a_ajustar].apply(
+                            lambda r: ajustar_fila_100_porc(r, columnas_regiones), axis=1
+                        )
+                    
+                    logger.info(f"[EXPORT DEBUG] Region pivot exitoso con ajuste. Columnas: {list(df_alloc_wide.columns)}")
+                    
+                    # Guardar totales_pct para merge
+                    df_alloc_wide = df_alloc_wide.merge(totales_pct, left_index=True, right_on='ID', how='left')
+                    df_alloc_wide = df_alloc_wide.set_index('ID')                    
                     logger.info(f"[EXPORT DEBUG] Pivot exitoso. Columnas de regiones: {list(df_alloc_wide.columns)}")
                     logger.info(f"[EXPORT DEBUG] Número de instrumentos con allocations: {len(df_alloc_wide)}")
                 else:
@@ -553,10 +672,18 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
                 return '01-01-2026'
             else:
                 # Lógica para Región (según documentación)
-                base_region = str(row.get('Base Región:', '')).strip().upper()
-                if base_region == 'FALTA ALLOCATION':
+                # Verifica fecha dependiendo de Region_Antigua o Base Región:
+                # Si definimos que NO debe ser 01-01-2026 en caso de falta allocation:
+                
+                # Check 1: Base Región explícito
+                base_estrategia = str(row.get('Base Región:', '')).strip().upper()
+                if base_estrategia == 'FALTA ALLOCATION':
                     return '31-12-2019'
-                return '01-01-2026'
+                
+                # Check 2: Region_Antigua balanceado pero sin data
+                # (Opcional, si queremos ser más estrictos)
+                
+                return row.get('Fecha', '01-01-2026') # Si ya existe Fecha (del pipeline) o default
         
         df_export['Fecha_Calc'] = df_export.apply(calc_fecha, axis=1)
         
@@ -651,8 +778,12 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
             'Id_ti_fixed': 'Id_ti',
             'Fecha_Calc': 'Fecha',
             'Clasificacion_Calc': 'Clasificacion',
-            'moneda_antigua_export': 'Moneda_Anterior'
+            'moneda_antigua_export': 'Moneda_Anterior' if tipo_validacion == 'Moneda' else None,
+            'Region_Antigua': 'Region_Anterior' if tipo_validacion == 'Región' else None
         }
+        
+        # Eliminar None keys
+        col_mapping = {k: v for k, v in col_mapping.items() if v is not None}
         
         # Aplicar renombre solo a las que existen
         rename_dict = {k: v for k, v in col_mapping.items() if k in df_export.columns}
@@ -661,7 +792,7 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
         # 5. Seleccionar columnas en orden prioritario (sin duplicados)
         # FLAG y Total_Pre_Escalado deben estar si existen en df_export
         # Sobreescribir se agregará manualmente en cada export según sea necesario
-        base_cols = ['ID', 'Instrumento', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'Moneda_Anterior', 'Flag', 'Total_Pre_Escalado']
+        base_cols = ['ID', 'Instrumento', 'Id_ti_valor', 'Id_ti', 'Fecha', 'Clasificacion', 'Moneda_Anterior', 'Region_Anterior', 'Flag', 'Estado', 'Total_Pre_Escalado']
         
         # Identificar columnas de allocations (las que estaban en df_alloc_wide)
         alloc_cols = list(df_alloc_wide.columns) if not df_alloc_wide.empty else []
@@ -689,6 +820,7 @@ def preparar_dataframe_exportacion(df_final, pipeline_obj, tipo_validacion):
                 df_export_final['Total'] = df_export_final[alloc_cols_presentes].sum(axis=1)
                 logger.info(f"[EXPORT DEBUG] Columna 'Total' agregada. Rango: {df_export_final['Total'].min():.2f}% - {df_export_final['Total'].max():.2f}%")
         
+        log_df_status(logger, df_export_final, f"UI: Exportación {tipo_validacion} Lista")
         return df_export_final
         
     except Exception as e:
@@ -993,6 +1125,8 @@ if tipo_validacion == "Región":
     
     col_bal, col_no_bal = st.columns(2)
     
+    # (Debug Global eliminado)
+    
     with col_bal:
         st.markdown("#### Instrumentos Balanceados")
         if st.button("📥 Exportar Balanceados", key="export_bal_region"):
@@ -1003,30 +1137,107 @@ if tipo_validacion == "Región":
                 ]
                 
                 if not balanceados.empty:
-                    # Usar la función de exportación completa (con allocations)
-                    df_alloc_ext = st.session_state.get('df_alloc_ext_region', pd.DataFrame())
+                    # Calcular FLAG
+                    balanceados_con_flag = balanceados.copy()
                     
-                    class PipelineMock:
-                        def __init__(self, df_alloc_ext):
-                            self.df_alloc_ext = df_alloc_ext
-                            self.df_alloc_ext_agrupado = df_alloc_ext
+                    # (Debug Pre-Flag eliminado)
+
+                    balanceados_con_flag['Flag'] = balanceados_con_flag.apply(calcular_flag_cambio_region, axis=1)
                     
-                    pipeline_obj = PipelineMock(df_alloc_ext)
-                    df_export_bal = preparar_dataframe_exportacion(balanceados, pipeline_obj, tipo_validacion)
-                    excel_bal = to_excel(df_export_bal)
+                    # Filtrar Casos relevantes si es necesario (generalmente todos los balanceados se exportan si hay cambios o confirmaciones)
+                    # Para consistencia con Moneda, podemos filtrar solo Caso_1 y Caso_2
+                    balanceados_con_flag = balanceados_con_flag[balanceados_con_flag['Flag'].isin(['Caso_1', 'Caso_2', 'Caso_3'])]
                     
-                    st.download_button(
-                        label="⬇️ Descargar Balanceados",
-                        data=excel_bal,
-                        file_name=f"balanceados_region_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_bal_region"
-                    )
-                    st.success(f"✅ {len(balanceados)} instrumentos balanceados listos para descargar")
+                    if not balanceados_con_flag.empty:
+                        # Usar la función de exportación completa (con allocations)
+                        df_alloc_ext = st.session_state.get('df_alloc_ext_region', pd.DataFrame())
+                            
+                        # Calculate Total_Pre_Escalado
+                        if not df_alloc_ext.empty and 'ID' in df_alloc_ext.columns:
+                            # (Debug Allocations Externos eliminado)
+                            
+                            # Priorizar SIEMPRE value original (percentage_num)
+                            pct_col = 'percentage_num'
+                            
+                            if pct_col not in df_alloc_ext.columns:
+                                # Fallback solo si no existe num (raro en este punto)
+                                pct_col = 'percentage_escalado' if 'percentage_escalado' in df_alloc_ext.columns else None
+                            
+                            if pct_col:
+                                totales_pre = df_alloc_ext.groupby('ID')[pct_col].sum().reset_index()
+                                totales_pre.rename(columns={pct_col: 'Total_Pre_Escalado'}, inplace=True)
+                                totales_pre['ID'] = totales_pre['ID'].astype(str)
+                                
+                                balanceados_con_flag['ID'] = balanceados_con_flag['ID'].astype(str)
+                                balanceados_con_flag = balanceados_con_flag.merge(totales_pre, on='ID', how='left')
+
+                        class PipelineMock:
+                            def __init__(self, df_alloc_ext):
+                                self.df_alloc_ext = df_alloc_ext
+                                self.df_alloc_ext_agrupado = df_alloc_ext
+                        
+                        pipeline_obj = PipelineMock(df_alloc_ext)
+                        df_export_bal = preparar_dataframe_exportacion(balanceados_con_flag, pipeline_obj, tipo_validacion)
+                        
+                        # Calcular Estado
+                        if 'Total_Pre_Escalado' in df_export_bal.columns:
+                            df_export_bal['Estado'] = df_export_bal.apply(calcular_estado, axis=1)
+                        
+                        # Ordenamiento Final de Columnas para Balanceados Región
+                        cols = list(df_export_bal.columns)
+                        
+                        # 1. Eliminar Moneda_Anterior explícitamente si se coló
+                        if 'Moneda_Anterior' in cols:
+                            cols.remove('Moneda_Anterior')
+                        
+                        # 2. Asegurar Region_Anterior está presente y ubicada
+                        if 'Region_Anterior' in cols and 'Clasificacion' in cols:
+                            # Mover Region_Anterior después de Clasificacion
+                            cols.remove('Region_Anterior')
+                            idx = cols.index('Clasificacion') + 1
+                            cols.insert(idx, 'Region_Anterior')
+
+                        # 3. Ordenar Flag, Estado, Total_Pre_Escalado
+                        if 'Flag' in cols:
+                            cols.remove('Flag')
+                            # Insertar Flag después de Region_Anterior (o Clasificacion si no está)
+                            anchor = 'Region_Anterior' if 'Region_Anterior' in cols else 'Clasificacion'
+                            if anchor in cols:
+                                idx = cols.index(anchor) + 1
+                                cols.insert(idx, 'Flag')
+                        
+                        if 'Estado' in cols:
+                            cols.remove('Estado')
+                            if 'Flag' in cols:
+                                idx = cols.index('Flag') + 1
+                                cols.insert(idx, 'Estado')
+                        
+                        if 'Total_Pre_Escalado' in cols:
+                            cols.remove('Total_Pre_Escalado')
+                            if 'Estado' in cols:
+                                idx = cols.index('Estado') + 1
+                                cols.insert(idx, 'Total_Pre_Escalado')
+                        
+                        df_export_bal = df_export_bal[cols]
+                        
+                        excel_bal = to_excel(df_export_bal)
+                        
+                        st.download_button(
+                            label="⬇️ Descargar Balanceados",
+                            data=excel_bal,
+                            file_name=f"balanceados_region_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_bal_region"
+                        )
+                        st.success(f"✅ {len(balanceados_con_flag)} instrumentos balanceados listos para descargar")
+                    else:
+                         st.info("No hay instrumentos balanceados con cambios relevantes (Flag Caso_1/2/3).")
                 else:
                     st.info("No hay instrumentos balanceados en la selección actual.")
             except Exception as e:
                 st.error(f"Error al generar reporte de balanceados: {e}")
+                import traceback
+                st.code(traceback.format_exc())
     
     with col_no_bal:
         st.markdown("#### Instrumentos No Balanceados")
@@ -1041,6 +1252,14 @@ if tipo_validacion == "Región":
                 if not no_balanceados.empty:
                     # Preparar export simple con solo 5 columnas
                     df_export_no_bal = no_balanceados.copy()
+
+                    # Calcular FLAG correctamente (usando la lógica de Casos, no el estado validado)
+                    # Asegurar que las columnas necesarias estén presentes para el cálculo
+                    if 'base-region' not in df_export_no_bal.columns and 'Region_Calculada' in df_export_no_bal.columns:
+                         # Simular para el cálculo si falta
+                         pass 
+                    
+                    df_export_no_bal['Flag'] = df_export_no_bal.apply(calcular_flag_cambio_region, axis=1)
                     
                     # base-region = Region_Calculada (NUEVO valor a actualizar en BD)
                     if 'Region_Calculada' in df_export_no_bal.columns:
@@ -1051,18 +1270,14 @@ if tipo_validacion == "Región":
                     # Region_Anterior = Región que estaba en BD (VIEJO valor)
                     if 'base-region' in df_export_no_bal.columns:
                         df_export_no_bal['Region_Anterior'] = df_export_no_bal['base-region']
+                        # Eliminar base-region original para evitar duplicados al renombrar
+                        df_export_no_bal.drop(columns=['base-region'], inplace=True)
                     elif 'Region_Antigua' in df_export_no_bal.columns:
                         df_export_no_bal['Region_Anterior'] = df_export_no_bal['Region_Antigua']
                     else:
                         df_export_no_bal['Region_Anterior'] = ''
                     
-                    # Crear columna Inconsistencia
-                    if 'Detalle_Inconsistencia' in df_export_no_bal.columns:
-                        df_export_no_bal['Inconsistencia_Final'] = df_export_no_bal['Detalle_Inconsistencia']
-                    elif 'Detalle_Validacion' in df_export_no_bal.columns:
-                        df_export_no_bal['Inconsistencia_Final'] = df_export_no_bal['Detalle_Validacion']
-                    else:
-                        df_export_no_bal['Inconsistencia_Final'] = ''
+                    # (Inconsistencia eliminada)
                     
                     # Agregar columna Sobreescribir
                     def calcular_sobreescribir(row):
@@ -1077,15 +1292,15 @@ if tipo_validacion == "Región":
                         'Instrumento': 'Instrumento',
                         'base-region_Nueva': 'base-region',
                         'Region_Anterior': 'Region_Anterior',
-                        'Inconsistencia_Final': 'Inconsistencia',
-                        'Sobreescribir': 'Sobreescribir'
+                        'Sobreescribir': 'Sobreescribir',
+                        'Flag': 'Flag'
                     }
                     
                     # Renombrar
                     df_export_no_bal = df_export_no_bal.rename(columns=columnas_finales)
                     
                     # Seleccionar columnas finales en el orden correcto
-                    cols_disponibles = ['ID', 'Instrumento', 'base-region', 'Region_Anterior', 'Inconsistencia', 'Sobreescribir']
+                    cols_disponibles = ['ID', 'Instrumento', 'base-region', 'Region_Anterior', 'Flag', 'Sobreescribir']
                     cols_presentes = [c for c in cols_disponibles if c in df_export_no_bal.columns]
                     df_export_no_bal = df_export_no_bal[cols_presentes]
                     

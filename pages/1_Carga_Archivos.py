@@ -603,9 +603,19 @@ def procesar_allocations_interno(df: pd.DataFrame) -> pd.DataFrame:
         
     df_long['percentage_num'] = pd.to_numeric(df_long['percentage_num'], errors='coerce')
     
-    # Ahora sí filtrar valores válidos
-    df_long = df_long[df_long['percentage_num'].notna()].copy()
-    df_long = df_long[df_long['percentage_num'] > 0].copy()
+    # Filtrar valores válidos, pero preservar Base Región 'FALTA ALLOCATION'
+    # Esto es crítico para que el pipeline de Región detecte Caso 3
+    mask_valido = (df_long['percentage_num'] > 0)
+    
+    if 'Base Región:' in df_long.columns:
+        mask_falta = df_long['Base Región:'].astype(str).str.contains("FALTA", case=False, na=False)
+        mask_valido = mask_valido | mask_falta
+        
+    if 'Moneda:' in df_long.columns:
+        mask_falta_mon = df_long['Moneda:'].astype(str).str.contains("FALTA", case=False, na=False)
+        mask_valido = mask_valido | mask_falta_mon
+        
+    df_long = df_long[mask_valido].copy()
     
     return df_long
 

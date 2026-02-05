@@ -82,7 +82,10 @@ El pipeline de conciliación de regiones procesa datos de posiciones y allocatio
 
 > [!WARNING]
 > **DIFERENCIA CRÍTICA CON MONEDAS:**  
-> Las allocations externas de región vienen en **formato ANCHO** (wide format) y se transforman a formato largo en el `data_loader.py`
+> Las allocations externas de región vienen en **formato ANCHO** (wide format) y se transforman a formato largo en el `data_loader.py`.
+>
+> **MEJORA RECIENTE (FALTA ALLOCATION):**
+> Se preservan filas con `Base Región: FALTA ALLOCATION` incluso si sus porcentajes son 0. Esto es crítico para detectar el Caso 3 más adelante.
 
 **Proceso:**
 1. **Cargar allocations externas** (ya transformadas a formato largo por data_loader)
@@ -128,6 +131,7 @@ Para cada instrumento:
    - Si balanceado: "balanceado"
    - De lo contrario: Región con mayor porcentaje
 5. Obtener allocations internas de Allocations Internos (regiones)
+   - **IMPORTANTE:** Se aplica `drop_duplicates(subset=['ID'])` para evitar multiplicar filas, ya que la fuente ahora preserva múltiples filas (melted) y filas especiales (FALTA ALLOCATION).
 6. Calcular `Region_Antigua` (región interna dominante)
 7. Hacer merge de `Base Región:` desde allocations internas
 
@@ -154,18 +158,12 @@ Para cada instrumento:
 **Entrada:** Instrumentos clasificados  
 **Salida:** Resultados finales de validación  
 **Proceso:**
-1. Generar `Semáforo` (Flag) basado en `Total_Pct_Ext`:
+1. Generar `Estado` (Calidad) basado en `Total_Pct_Ext`:
    - 60-120%: VALIDO
    - 40-60% o >120%: REVISION
    - <40%: ERROR
 2. Comparar `Region_Calculada` vs `base-region`
-3. Generar `Detalle_Validacion` si difieren
-4. Detectar inconsistencias:
-   - BALANCEADO sin allocations
-   - BALANCEADO pero región dominante
-   - Región específica pero balanceado
-   - Región incorrecta
-5. Renombrar columnas para export:
+3. Renombrar columnas para export:
    - `Nombre` → `Instrumento`
    - `Semáforo` → `Flag`
    - etc.
@@ -175,8 +173,8 @@ Para cada instrumento:
 - `Instrumento`
 - `Region_Calculada`
 - `base-region`
-- `Semáforo` / `Flag`
-- `Detalle_Validacion`
+- `Semáforo` (Estado Calidad)
+- `Flag` (Calculado en Export)
 - `Total_Pct_Ext`
 - `Region_Antigua`
 
@@ -227,11 +225,10 @@ Para cada instrumento:
    - Caso contrario: `Fecha = "01-01-2026"`
 4. Establecer `Clasificacion = "base-region"` (literal)
 5. Corregir `Id_ti` e `Id_ti_valor` para usar solo RIC/Isin
-6. Combinar `Detalle_Inconsistencia` y `Detalle_Validacion` en una sola `Inconsistencia`
-7. Seleccionar y renombrar columnas
+6. Seleccionar y renombrar columnas
 
 **Columnas de Salida:**
-- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag, Inconsistencia
+- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag
 - Columnas de regiones: LATAM, ASIA, EUROPA, NORTEAMERICA, etc. (del pivot)
 
 **Diferencias con Monedas:**
@@ -249,7 +246,7 @@ Para cada instrumento:
 **Propósito:** Actualizar base de datos con instrumentos clasificados como balanceados
 
 **Columnas principales:**
-- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag, Inconsistencia, **Sobreescribir**
+- ID, Id_ti_valor, Id_ti, Fecha, Clasificacion, region_antigua, Flag, **Sobreescribir**
 - Columnas de regiones: LATAM, ASIA, EUROPA, NORTEAMERICA, AFRICA, etc.
 
 **Archivo:** `Balanceados_Region.xlsx`
@@ -264,7 +261,6 @@ Para cada instrumento:
 - `Instrumento`: Nombre del instrumento
 - `base-region`: Valor **NUEVO** (de `Region_Calculada`)
 - `Region_Anterior`: Valor **VIEJO** (de allocations internas)
-- `Inconsistencia`: Detalle del error o vacío
 - `Sobreescribir`: "y" o "n" (basado en Flag)
 
 **Propósito:** Actualizar campo `base-region` en base de datos con nueva región calculada
@@ -323,7 +319,7 @@ Allocations Internos → [PASO 5: Clasificar] ← Instrumentos  ↓
 | **Cálculo de Fecha Export** | Último día mes anterior | Valores fijos (31-12-2019 o 01-01-2026) |
 | **Normalización** | `currency_mapping.py` | `region_mapping.py` |
 | **Umbral clasificación** | 90% | 90% (mismo) |
-| **Rangos Flag** | 60-120% VALIDO | 60-120% VALIDO (mismo) |
+| **Rangos Estado** | 60-120% VALIDO | 60-120% VALIDO (mismo) |
 | **Lógica de pasos** | Idéntica | Idéntica (solo nombres cambian) |
 
 ---
@@ -334,6 +330,6 @@ Allocations Internos → [PASO 5: Clasificar] ← Instrumentos  ↓
 2. **Transformación Automática:** El `data_loader.py` transforma automáticamente de ancho a largo
 3. **Lógica Idéntica:** Todos los pasos tienen la misma lógica que monedas, solo cambian nombres de columnas
 4. **Umbral 90%:** Se mantiene el mismo umbral para clasificación balanceado/no balanceado
-5. **Flags Idénticos:** Los rangos de validación son los mismos (60-120% VALIDO, etc.)
+5. **Estados Idénticos:** Los rangos de validación (calidad) son los mismos (60-120% VALIDO, etc.)
 6. **Separación Total:** Este pipeline es completamente independiente del pipeline de monedas
 7. **Mapeo de Regiones:** Existe normalización de nombres de regiones (Refinitiv → interno)

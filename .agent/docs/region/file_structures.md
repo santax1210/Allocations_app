@@ -220,6 +220,38 @@ El archivo se lee en formato **ancho** y se transforma a formato **largo** (long
 
 ---
 
+## Archivos de Salida (Reportes)
+
+### 1. Balanceados_Region.xlsx
+**Filtro:** `Region_Calculada == "balanceado"`  
+**Propósito:** Actualizar base de datos con instrumentos clasificados como balanceados.
+
+**Columnas:**
+- `ID`: Identificador interno
+- `Instrumento`: Nombre normalizado
+- `Id_ti_valor`, `Id_ti`: Identificador usado para el match (RICo ISIN)
+- `Fecha`: Fecha de export (31-12-2019 o 01-01-2026)
+- `Clasificacion`: Literal "base-region"
+- `Region_Anterior`: Desde allocations internas
+- `Flag`: Semáforo (Caso_1, Caso_2, Caso_3)
+- `Estado`: Estado de validación (VALIDO, REVISION, ERROR)
+- `Total_Pre_Escalado`: % Total RAW antes de escalar
+- `[Regiones]`: Columnas de regiones (LATAM, ASIA, etc.) con % escalado
+
+**Nota:** 
+- `Caso_3` (FALTA ALLOCATION) aparecerá con `Total_Pre_Escalado = 0.0` y `Estado = ERROR`.
+
+### 2. No_Balanceados_Region.xlsx
+**Filtro:** `Region_Calculada != "balanceado"`  
+**Propósito:** Actualizar campo `base-region` en base de datos.
+**Columnas:** `ID`, `Instrumento`, `base-region` (Nueva Región), `Region_Anterior` (Región Anterior), `Flag`, `Sobreescribir`.
+
+### 3. Sin_Datos_Region.xlsx
+**Filtro:** `Region_Calculada == "Sin Datos"`
+**Columnas:** `ID`, `Nombre`, `Id_ti_valor`, `Id_ti`.
+
+---
+
 ## Notas Importantes
 
 1. **ID es la Clave Universal:** Una vez que los instrumentos están cruzados, `ID` se usa para todos los joins

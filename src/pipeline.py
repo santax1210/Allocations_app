@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from src.ml_models import add_features, AnomalyDetector
 from src.currency_mapping import CURRENCY_MAP_REFINITIV_TO_ISO, normalize_currency_name
+from utils.logging_utils import log_df_status
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class ConciliacionPipeline:
         ].copy()
         
         logger.info(f"Posiciones filtradas: {len(df_filtrado)} de {len(self.posiciones)}")
+        log_df_status(logger, df_filtrado, "PASO 1: Filtrar Posiciones")
         return df_filtrado
     
     def paso_2_cruce_instrumentos(self, df_posiciones: pd.DataFrame) -> pd.DataFrame:
@@ -158,6 +160,7 @@ class ConciliacionPipeline:
         cobertura = (len(df_cruzado) / total_posiciones * 100) if total_posiciones > 0 else 0
         logger.info(f"Cobertura del cruce: {cobertura:.1f}% ({len(df_cruzado)}/{total_posiciones})")
         
+        log_df_status(logger, df_cruzado, "PASO 2: Cruce Instrumentos")
         return df_cruzado
     
     def paso_3_filtrar_tipo_instrumento(self, df_cruzado: pd.DataFrame) -> pd.DataFrame:
@@ -214,6 +217,9 @@ class ConciliacionPipeline:
         
         df_filtrado['Tipo_Grupo'] = df_filtrado['Tipo'].apply(asignar_grupo_tipo)
         
+        df_filtrado['Tipo_Grupo'] = df_filtrado['Tipo'].apply(asignar_grupo_tipo)
+        
+        log_df_status(logger, df_filtrado, "PASO 3: Filtrar Tipo Instrumento")
         return df_filtrado
     
     def paso_4_obtener_allocations_externo(self, df_filtrado: pd.DataFrame) -> pd.DataFrame:
@@ -362,6 +368,7 @@ class ConciliacionPipeline:
         alloc_ext_filtrado['matched_ric'] = alloc_ext_filtrado.get('RIC', '')
         
         logger.info(f"  Total allocations externos procesados: {len(alloc_ext_filtrado)} registros")
+        log_df_status(logger, alloc_ext_filtrado, "PASO 4: Allocations Externos")
         return alloc_ext_filtrado
     
     def paso_5_identificar_moneda_principal(self, df_filtrado: pd.DataFrame, df_alloc_ext: pd.DataFrame) -> pd.DataFrame:
@@ -539,6 +546,7 @@ class ConciliacionPipeline:
         
         # Detección de inconsistencias eliminada - ya no se usa en el proyecto
         
+        log_df_status(logger, df_resultado, "PASO 5: Identificar Moneda")
         return df_resultado
     
 
@@ -597,6 +605,7 @@ class ConciliacionPipeline:
         logger.info("PASO 8: Detectando anomalías con Isolation Forest...")
         detector = AnomalyDetector(contamination=0.05)
         df_final = detector.detect_anomalies(df_final)
+        log_df_status(logger, df_final, "PASO 8: Anomalías Detectadas")
         
         # Guardar modelo entrenado para uso futuro
         detector.save_model('data/models/isolation_forest_v1.pkl')
